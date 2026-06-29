@@ -1,17 +1,21 @@
 """Stateful reusable agent harness built on the provider/tool loop."""
 
+from __future__ import annotations
+
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from inspect import isawaitable
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from axis_agent.events import AgentEvent, MessageEndEvent, MessageStartEvent, QueueUpdateEvent
 from axis_agent.loop import run_agent_loop
 from axis_agent.messages import AgentMessage, AssistantMessage, ToolResultMessage, UserMessage
 from axis_agent.tools import AgentTool
-from axis_ai.provider import ModelProvider
+
+if TYPE_CHECKING:
+    from axis_ai.provider import ModelProvider
 
 EventListener = Callable[[AgentEvent], Awaitable[None] | None]
 QueueMode = Literal["one_at_a_time", "all"]

@@ -1,6 +1,9 @@
 """Provider-neutral agent loop."""
 
+from __future__ import annotations
+
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING
 
 from axis_agent.events import (
     AgentEndEvent,
@@ -21,15 +24,9 @@ from axis_agent.events import (
 from axis_agent.messages import AgentMessage, AssistantMessage, ToolResultMessage
 from axis_agent.tools import AgentTool, AgentToolResult, ToolCall
 from axis_agent.types import JSONValue
-from axis_ai.events import (
-    ProviderErrorEvent,
-    ProviderResponseEndEvent,
-    ProviderResponseStartEvent,
-    ProviderRetryEvent,
-    ProviderTextDeltaEvent,
-    ProviderThinkingDeltaEvent,
-)
-from axis_ai.provider import CancellationToken, ModelProvider
+
+if TYPE_CHECKING:
+    from axis_ai.provider import CancellationToken, ModelProvider
 
 
 async def run_agent_loop(
@@ -51,6 +48,18 @@ async def run_agent_loop(
     messages and tool results as the run progresses; streamed deltas remain
     ephemeral observations.
     """
+    # Import provider event classes at execution time. ``axis_ai.events`` uses
+    # agent message/tool contracts, so importing it while ``axis_agent`` itself
+    # is initializing would make ``import axis_ai`` order-dependent.
+    from axis_ai.events import (
+        ProviderErrorEvent,
+        ProviderResponseEndEvent,
+        ProviderResponseStartEvent,
+        ProviderRetryEvent,
+        ProviderTextDeltaEvent,
+        ProviderThinkingDeltaEvent,
+    )
+
     yield AgentStartEvent()
 
     if max_turns is not None and max_turns < 1:

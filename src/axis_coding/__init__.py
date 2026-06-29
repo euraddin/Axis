@@ -1,5 +1,45 @@
 """Coding-agent application layer for Axis."""
 
+from axis_coding.context import (
+    ProjectContextFile,
+    discover_project_context,
+    discover_project_context_with_diagnostics,
+)
+from axis_coding.paths import AxisPaths
+from axis_coding.prompt_templates import (
+    PromptTemplate,
+    expand_prompt_template_command,
+    load_prompt_templates,
+    load_prompt_templates_with_diagnostics,
+    render_prompt_template,
+)
+from axis_coding.resources import (
+    AxisResourcePaths,
+    ResourceDiagnostic,
+    ResourceError,
+    derive_markdown_description,
+    find_project_root,
+    parse_markdown_resource,
+    resource_paths_with_cwd,
+)
+from axis_coding.session import CodingSession, CodingSessionConfig, CodingSessionError
+from axis_coding.skills import (
+    Skill,
+    expand_skill_command,
+    format_skill_invocation,
+    load_skills,
+    load_skills_with_diagnostics,
+)
+from axis_coding.system_prompt import (
+    AXIS_IDENTITY,
+    OPERATING_PRINCIPLES,
+    BuildSystemPromptOptions,
+    build_system_prompt,
+    collect_tool_guidelines,
+    format_available_tools,
+    format_project_context,
+    format_skills_for_prompt,
+)
 from axis_coding.tools import (
     ToolDefinition,
     ToolInputError,
@@ -17,7 +57,19 @@ from axis_coding.tools import (
     truncate_tail,
 )
 
+__version__ = "0.1.0"
+
 __all__ = [
+    "AXIS_IDENTITY",
+    "AxisPaths",
+    "AxisResourcePaths",
+    "BuildSystemPromptOptions",
+    "OPERATING_PRINCIPLES",
+    "ProjectContextFile",
+    "PromptTemplate",
+    "ResourceDiagnostic",
+    "ResourceError",
+    "Skill",
     "ToolDefinition",
     "ToolInputError",
     "TruncationResult",
@@ -30,6 +82,29 @@ __all__ = [
     "create_read_tool_definition",
     "create_write_tool",
     "create_write_tool_definition",
+    "build_system_prompt",
+    "collect_tool_guidelines",
+    "discover_project_context",
+    "discover_project_context_with_diagnostics",
+    "derive_markdown_description",
+    "expand_prompt_template_command",
+    "expand_skill_command",
+    "find_project_root",
+    "format_skill_invocation",
+    "format_available_tools",
+    "format_project_context",
+    "format_skills_for_prompt",
+    "load_prompt_templates",
+    "load_prompt_templates_with_diagnostics",
+    "load_skills",
+    "load_skills_with_diagnostics",
+    "parse_markdown_resource",
+    "render_prompt_template",
+    "resource_paths_with_cwd",
     "truncate_head",
     "truncate_tail",
+    "CodingSession",
+    "CodingSessionConfig",
+    "CodingSessionError",
+    "__version__",
 ]
