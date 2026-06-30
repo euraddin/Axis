@@ -6,9 +6,10 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 from textual.geometry import Offset
 from textual.selection import SELECT_ALL, Selection
-from textual.widgets import Input, ListView, Static, TextArea
+from textual.widgets import Footer, Input, ListView, Static, TextArea
 
 import axis_coding.tui.app as tui_app
 from axis_agent import (
@@ -44,6 +45,7 @@ from axis_coding import (
     CodingSessionConfig,
     FileCredentialStore,
     ModelChoice,
+    ProjectContextFile,
     ProviderSettings,
     ScopedModelConfig,
     SessionManager,
@@ -57,16 +59,20 @@ from axis_coding.tui import (
     AxisTuiApp,
     BranchSummaryInstructionsScreen,
     CommandOutputScreen,
+    CompactSessionInfo,
     LoginProviderPickerScreen,
     LoginScreen,
     ModelPickerScreen,
     PromptInput,
     SessionPickerScreen,
+    SessionSidebar,
     StreamingTranscriptMessageWidget,
     ThemePickerScreen,
     TranscriptMessageWidget,
     TranscriptView,
     TreePickerScreen,
+    render_compact_session_info,
+    render_session_sidebar,
 )
 from axis_coding.tui.config import TuiKeybindings, TuiSettings
 
@@ -78,6 +84,14 @@ async def wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> 
         if loop.time() >= deadline:
             raise AssertionError("condition was not reached before timeout")
         await asyncio.sleep(0.01)
+
+
+def visible_footer_bindings(app: AxisTuiApp) -> dict[str, str]:
+    return {
+        binding.description: binding.key_display or binding.key
+        for _, binding, _enabled, _tooltip in app.screen.active_bindings.values()
+        if binding.show
+    }
 
 
 class CancellableSession:
@@ -101,8 +115,13 @@ class CancellableSession:
         self.available_thinking_levels = ("high", "xhigh")
         self.thinking_unavailable_reason = None
         self.messages = messages
+        self.tools = ()
         self.skills = ()
         self.prompt_templates = ()
+        self.context_files = ()
+        self.context_token_estimate = 12_034
+        self.context_window_tokens = 128_000
+        self.auto_compact_token_threshold = None
         self._running = False
         self.cancel_called = False
         self._cancel_event = asyncio.Event()
@@ -207,6 +226,242 @@ class CancellableSession:
             ok=True,
             added_to_context=add_to_context,
         )
+
+
+def test_session_sidebar_and_compact_info_render_axis_session_facts(
+    tmp_path: Path,
+) -> None:
+    session = CancellableSession(tmp_path)
+    session.tools = (
+        PromptTemplate(
+            name="read",
+            path=tmp_path / "read.md",
+            content="Read files.",
+            description="Read files",
+        ),
+    )
+    session.skills = (
+        Skill(
+            name="review",
+            path=tmp_path / "review" / "SKILL.md",
+            content="Review code.",
+            description="Review code",
+        ),
+    )
+    session.prompt_templates = (
+        PromptTemplate(
+            name="explain",
+            path=tmp_path / "explain.md",
+            content="Explain code.",
+            description="Explain code",
+        ),
+    )
+    session.context_files = (
+        ProjectContextFile(path=tmp_path / "AGENTS.md", content="Project rules."),
+        ProjectContextFile(
+            path=tmp_path / ".agents" / "AGENTS.md",
+            content="Agent rules.",
+        ),
+    )
+    console = Console(record=True, width=240)
+    compact_session = CancellableSession(Path("/workspace/project"))
+
+    console.print(render_session_sidebar(session))
+    console.print(render_compact_session_info(compact_session))
+    compact_session.auto_compact_token_threshold = 64_000
+    console.print(render_compact_session_info(compact_session))
+
+    output = console.export_text()
+    assert "A X I S" in output
+    assert "provider" in output
+    assert "deepseek" in output
+    assert "fake" in output
+    assert "thinking" in output
+    assert "high" in output
+    assert "AGENTS.md" in output
+    assert ".agents/AGENTS.md" in output
+    assert "read" in output
+    assert "review" in output
+    assert "explain" in output
+    assert "12k/128k context" in output
+    assert "12k/64k context" in output
+    assert "/workspace/project (--)" in output
+
+
+def test_tui_sidebar_responds_to_terminal_width_and_height(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(CancellableSession(tmp_path))
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            sidebar = app.query_one("#sidebar", SessionSidebar)
+            compact = app.query_one("#compact-session-info", CompactSessionInfo)
+            assert sidebar.display is True
+            assert compact.display is True
+            assert not app.has_class("-hide-sidebar")
+
+            await pilot.resize_terminal(width=80, height=30)
+            await pilot.pause()
+            assert sidebar.display is False
+            assert compact.display is True
+
+            await pilot.resize_terminal(width=120, height=18)
+            await pilot.pause()
+            assert sidebar.display is False
+            assert compact.display is True
+
+            await pilot.resize_terminal(width=120, height=30)
+            await pilot.pause()
+            assert sidebar.display is True
+            assert compact.display is True
+
+    asyncio.run(scenario())
+
+
+def test_tui_sidebar_fills_workspace_and_compact_info_wraps(tmp_path: Path) -> None:
+    compact_console = Console(record=True, width=36)
+    compact_console.print(render_compact_session_info(CancellableSession(tmp_path)))
+    assert len(compact_console.export_text().splitlines()) > 1
+
+    async def scenario() -> None:
+        app = AxisTuiApp(CancellableSession(tmp_path))
+
+        async with app.run_test(size=(120, 30)):
+            workspace = app.query_one("#workspace")
+            sidebar = app.query_one("#sidebar", SessionSidebar)
+            transcript = app.query_one("#transcript", TranscriptView)
+            prompt = app.query_one("#prompt", PromptInput)
+
+            assert sidebar.region.height == workspace.region.height
+            assert sidebar.outer_size.height == workspace.size.height
+            assert transcript.styles.min_width is not None
+            assert transcript.styles.min_width.value == 1
+            assert prompt.soft_wrap is True
+
+    asyncio.run(scenario())
+
+
+def test_tui_prompt_grows_to_six_lines_then_scrolls(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(CancellableSession(tmp_path))
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            assert prompt.size.height == 1
+
+            prompt.text = "x" * 500
+            await pilot.pause()
+            assert prompt.size.height == 6
+
+            prompt.text = "x" * 1000
+            await pilot.pause()
+            assert prompt.size.height == 6
+            assert prompt.max_scroll_y > 0
+
+    asyncio.run(scenario())
+
+
+def test_tui_clicking_transcript_refocuses_prompt(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(CancellableSession(tmp_path))
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            transcript = app.query_one("#transcript", TranscriptView)
+            transcript.focus()
+            await pilot.pause()
+            assert app.screen.focused is transcript
+
+            await pilot.click("#transcript")
+            await pilot.pause()
+            assert app.screen.focused is prompt
+
+    asyncio.run(scenario())
+
+
+def test_tui_runs_initial_positional_prompt_on_mount(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        provider = FakeProvider(
+            [[ProviderResponseEndEvent(message=AssistantMessage(content="Repository explained"))]]
+        )
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,
+                model="fake",
+                storage=JsonlSessionStorage(tmp_path / "initial-prompt.jsonl"),
+                cwd=tmp_path,
+                tools=[],
+            )
+        )
+        app = AxisTuiApp(session, initial_prompt="explain this repo")
+
+        async with app.run_test(size=(120, 30)):
+            await wait_until(lambda: len(provider.calls) == 1 and not session.is_running)
+
+        assert provider.calls[0][2] == [UserMessage(content="explain this repo")]
+        assert [(item.role, item.text) for item in app.state.items] == [
+            ("user", "explain this repo"),
+            ("assistant", "Repository explained"),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_tui_footer_hints_follow_normal_completion_and_running_modes(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(CancellableSession(tmp_path))
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            assert app.query_one(Footer) is not None
+            assert visible_footer_bindings(app) == {
+                "Quit": "ctrl+d",
+                "Clear": "ctrl+c",
+                "Commands": "ctrl+k",
+                "Submit": "enter",
+                "Newline": "shift+enter",
+                "Sessions": "ctrl+r",
+                "Thinking": "shift+tab",
+                "Model": "ctrl+p",
+                "Cancel": "escape",
+            }
+
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/se"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.pause()
+            assert visible_footer_bindings(app) == {
+                "Choose": "Up/Down",
+                "Complete": "Tab/Enter",
+                "Close": "escape",
+            }
+
+            prompt.value = ""
+            prompt.cursor_position = 0
+            app._rebuild_completions(prompt)
+            app.adapter.apply(AgentStartEvent())
+            app._render_state()
+            assert visible_footer_bindings(app) == {
+                "Steer": "enter",
+                "Follow-up": "alt+enter",
+                "Cancel": "escape",
+                "Thinking": "ctrl+t",
+                "Tools": "ctrl+o",
+            }
+
+    asyncio.run(scenario())
+
+
+def test_tui_keeps_textual_footer_on_short_windows(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(CancellableSession(tmp_path))
+
+        async with app.run_test(size=(120, 18)):
+            assert app.query_one(Footer).display is True
+            assert app.query_one("#sidebar", SessionSidebar).display is False
+            assert app.query_one("#compact-session-info", CompactSessionInfo).display is True
+
+    asyncio.run(scenario())
 
 
 def test_tui_app_uses_theme_variables_and_configured_keys(tmp_path: Path) -> None:

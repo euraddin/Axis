@@ -14,7 +14,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingsMap, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.events import Key
+from textual.events import Click, Key, Resize
 from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static, TextArea
@@ -75,12 +75,18 @@ from axis_coding.tui.config import (
     load_tui_settings,
     save_tui_settings,
 )
-from axis_coding.tui.rendering import format_tui_status
 from axis_coding.tui.state import TuiState, format_terminal_command_result_block
-from axis_coding.tui.widgets import TranscriptView, render_completion_suggestions
+from axis_coding.tui.widgets import (
+    CompactSessionInfo,
+    SessionSidebar,
+    TranscriptView,
+    render_completion_suggestions,
+)
 
 ACTIVITY_TICK_SECONDS = 0.15
 ACTIVITY_INDICATOR_HEIGHT = 3
+SIDEBAR_MIN_WIDTH = 96
+SIDEBAR_MIN_HEIGHT = 24
 
 
 class CompletionActionTarget(Protocol):
@@ -102,6 +108,14 @@ class CompletionActionTarget(Protocol):
 
     def action_cycle_model(self) -> None: ...
 
+    def action_cancel_run(self) -> None: ...
+
+    def action_toggle_tool_results(self) -> None: ...
+
+    def action_toggle_thinking(self) -> None: ...
+
+    def action_exit_app(self) -> None: ...
+
     async def action_submit_prompt(self) -> None: ...
 
     async def action_submit_follow_up(self) -> None: ...
@@ -121,6 +135,24 @@ class PromptInput(TextArea):
         super().__init__(**kwargs)
         self.tui_keybindings = tui_keybindings or TuiKeybindings()
         self.shell_mode_style = ""
+        self._base_bindings = self._bindings.copy()
+        self._footer_mode: Literal["normal", "completion", "running"] = "normal"
+        self._apply_prompt_bindings()
+
+    def set_footer_mode(self, mode: Literal["normal", "completion", "running"]) -> None:
+        if mode == self._footer_mode:
+            return
+        self._footer_mode = mode
+        self._apply_prompt_bindings()
+        self.refresh_bindings()
+
+    def _apply_prompt_bindings(self) -> None:
+        self._bindings = BindingsMap.merge(
+            [
+                self._base_bindings,
+                BindingsMap(_prompt_bindings(self.tui_keybindings, mode=self._footer_mode)),
+            ]
+        )
 
     @property
     def value(self) -> str:
@@ -180,6 +212,10 @@ class PromptInput(TextArea):
             event.stop()
             event.prevent_default()
             target.action_cycle_model()
+        elif event.key == keybindings.cancel:
+            event.stop()
+            event.prevent_default()
+            target.action_cancel_run()
         elif event.key == keybindings.completion_next and self._has_completions():
             event.stop()
             event.prevent_default()
@@ -200,6 +236,67 @@ class PromptInput(TextArea):
             event.prevent_default()
             self.text = ""
             self.move_cursor((0, 0))
+        elif event.key == keybindings.quit:
+            event.stop()
+            event.prevent_default()
+            target.action_exit_app()
+
+    def action_accept_completion(self) -> None:
+        cast(CompletionActionTarget, self.app).action_accept_completion()
+
+    def action_completion_next(self) -> None:
+        target = cast(CompletionActionTarget, self.app)
+        if self._has_completions():
+            target.action_completion_next()
+        else:
+            self.action_cursor_down()
+
+    def action_completion_previous(self) -> None:
+        target = cast(CompletionActionTarget, self.app)
+        if self._has_completions():
+            target.action_completion_previous()
+        elif not self.text and target.action_edit_queued_follow_up():
+            return
+        else:
+            self.action_cursor_up()
+
+    def action_cancel(self) -> None:
+        cast(CompletionActionTarget, self.app).action_cancel_run()
+
+    def action_open_command_palette(self) -> None:
+        cast(CompletionActionTarget, self.app).action_open_command_palette()
+
+    def action_open_session_picker(self) -> None:
+        cast(CompletionActionTarget, self.app).action_open_session_picker()
+
+    def action_cycle_thinking(self) -> None:
+        cast(CompletionActionTarget, self.app).action_cycle_thinking()
+
+    def action_cycle_model(self) -> None:
+        cast(CompletionActionTarget, self.app).action_cycle_model()
+
+    def action_toggle_tool_results(self) -> None:
+        cast(CompletionActionTarget, self.app).action_toggle_tool_results()
+
+    def action_toggle_thinking(self) -> None:
+        cast(CompletionActionTarget, self.app).action_toggle_thinking()
+
+    def action_clear_prompt(self) -> None:
+        if not self.selected_text:
+            self.text = ""
+            self.move_cursor((0, 0))
+
+    async def action_submit_prompt(self) -> None:
+        await cast(CompletionActionTarget, self.app).action_submit_prompt()
+
+    async def action_submit_follow_up(self) -> None:
+        await cast(CompletionActionTarget, self.app).action_submit_follow_up()
+
+    def action_insert_newline(self) -> None:
+        self.insert("\n")
+
+    def action_quit(self) -> None:
+        cast(CompletionActionTarget, self.app).action_exit_app()
 
     def get_line(self, line_index: int) -> Text:
         """Highlight the leading shell-mode prefix on the first line."""
@@ -248,6 +345,27 @@ class TuiSession(Protocol):
 
     @property
     def available_thinking_levels(self) -> tuple[str, ...]: ...
+
+    @property
+    def context_token_estimate(self) -> int: ...
+
+    @property
+    def context_window_tokens(self) -> int: ...
+
+    @property
+    def auto_compact_token_threshold(self) -> int | None: ...
+
+    @property
+    def tools(self) -> Sequence[object]: ...
+
+    @property
+    def skills(self) -> Sequence[object]: ...
+
+    @property
+    def prompt_templates(self) -> Sequence[object]: ...
+
+    @property
+    def context_files(self) -> Sequence[object]: ...
 
     @property
     def is_running(self) -> bool:
@@ -814,51 +932,81 @@ class AxisTuiApp(App[None]):
         color: $axis-chrome-text;
     }
 
-    #main {
+    Toast {
+        background: $axis-chrome-background;
+        color: $axis-chrome-text;
+    }
+
+    Toast .toast--title {
+        color: $axis-accent;
+    }
+
+    #workspace {
         height: 1fr;
+    }
+
+    #sidebar {
+        width: 32;
+        min-width: 28;
+        height: 1fr;
+        padding: 1 1 0 0;
+        background: $axis-sidebar-background;
+        border-right: tall $axis-border;
+    }
+
+    AxisTuiApp.-hide-sidebar #sidebar {
+        display: none;
+    }
+
+    #main-pane {
+        width: 1fr;
+        padding: 1 1 0 1;
+    }
+
+    AxisTuiApp.-hide-sidebar #main-pane {
+        padding-left: 1;
     }
 
     #transcript {
         height: 1fr;
-        padding: 1 2;
-        border-bottom: solid $axis-border;
+        padding: 0 0 0 2;
+        border: none;
         background: $axis-transcript-background;
         scrollbar-size-vertical: 0;
         scrollbar-size-horizontal: 0;
     }
 
-    #status {
-        height: 1;
-        padding: 0 2;
-        color: $axis-muted-text;
-        background: $axis-chrome-background;
-    }
-
     #queued-messages {
         height: auto;
-        margin: 0 2;
+        max-height: 8;
+        margin: 0 1 1 1;
+        padding: 0 1;
+        background: $axis-screen-background;
         color: $axis-muted-text;
     }
 
     #prompt-row {
         height: auto;
-        min-height: 3;
+        margin: 0 1 1 1;
     }
 
     #prompt-prefix {
-        width: 3;
+        width: 2;
         height: 3;
+        padding: 0;
+        margin: 0;
         content-align: center middle;
         color: $axis-accent;
+        text-style: bold;
     }
 
     #prompt {
         width: 1fr;
         height: auto;
-        min-height: 3;
-        max-height: 10;
-        margin: 0 1 1 1;
-        border: tall $axis-prompt-border;
+        max-height: 8;
+        margin: 0;
+        padding: 0 1;
+        border: tall transparent;
         background: $axis-prompt-background;
         color: $axis-prompt-text;
     }
@@ -873,11 +1021,19 @@ class AxisTuiApp(App[None]):
 
     #autocomplete {
         height: auto;
-        max-height: 12;
-        margin: 0 2 1 2;
+        max-height: 18;
+        margin: 0 1 1 1;
         padding: 0 1;
         background: $axis-autocomplete-background;
-        color: $axis-prompt-text;
+        color: $axis-screen-text;
+    }
+
+    #compact-session-info {
+        height: auto;
+        max-height: 3;
+        margin: 0 1 1 1;
+        padding: 0 1;
+        color: $axis-muted-text;
     }
 
     CommandOutputScreen, ThemePickerScreen, SessionPickerScreen, TreePickerScreen,
@@ -965,8 +1121,11 @@ class AxisTuiApp(App[None]):
         *,
         tui_settings: TuiSettings | None = None,
         startup_message: str | None = None,
+        initial_prompt: str | None = None,
     ) -> None:
         self.tui_settings = tui_settings or TuiSettings()
+        self.startup_message = startup_message
+        self.initial_prompt = initial_prompt
         super().__init__()
         self._bindings = BindingsMap(_app_bindings(self.tui_settings.keybindings))
         self.session = session
@@ -976,8 +1135,6 @@ class AxisTuiApp(App[None]):
         )
         self.state = TuiState(skills=tuple(getattr(session, "skills", ())))
         self.state.load_messages(getattr(session, "messages", ()))
-        if startup_message:
-            self.state.add_item("status", startup_message)
         self.adapter = TuiEventAdapter(self.state)
         self.completion_state = CompletionState()
         self._cancel_requested = False
@@ -997,27 +1154,49 @@ class AxisTuiApp(App[None]):
     def compose(self) -> ComposeResult:
         """Create the compact single-session layout."""
         yield Header()
-        with Vertical(id="main"):
-            yield TranscriptView(id="transcript", min_width=1)
-            yield Static(id="status")
-            yield Static(id="queued-messages")
-            with Horizontal(id="prompt-row"):
-                yield Static("A", id="prompt-prefix")
-                yield PromptInput(
-                    placeholder="Ask Axis…  Enter steers · Alt+Enter follows up",
-                    id="prompt",
-                    tui_keybindings=self.tui_settings.keybindings,
-                )
-            yield Static(id="autocomplete")
+        with Horizontal(id="workspace"):
+            yield SessionSidebar(id="sidebar")
+            with Vertical(id="main-pane"):
+                yield TranscriptView(id="transcript", min_width=1)
+                yield Static(id="queued-messages")
+                with Horizontal(id="prompt-row"):
+                    yield Static("A", id="prompt-prefix")
+                    yield PromptInput(
+                        placeholder="Ask Axis…  Enter submits · Shift+Enter adds a line",
+                        id="prompt",
+                        tui_keybindings=self.tui_settings.keybindings,
+                    )
+                yield CompactSessionInfo(id="compact-session-info")
+                yield Static(id="autocomplete")
         yield Footer()
 
     def on_mount(self) -> None:
         """Render initial state and focus the prompt."""
         self._render_state()
+        self._update_responsive_layout(self.size.width, self.size.height)
         prompt = self.query_one("#prompt", PromptInput)
         prompt.shell_mode_style = self.tui_settings.resolved_theme.accent
         prompt.focus()
         self._rebuild_completions(prompt)
+        if self.startup_message:
+            self._notify(self.startup_message, severity="warning")
+        if self.initial_prompt and self.initial_prompt.strip():
+            content = self.initial_prompt.strip()
+            self._prompt_worker = self.run_worker(
+                self._run_prompt(content),
+                name="axis-initial-prompt",
+                group="agent",
+                exclusive=True,
+                exit_on_error=False,
+            )
+
+    def on_resize(self, event: Resize) -> None:
+        self._update_responsive_layout(event.size.width, event.size.height)
+
+    def on_click(self, event: Click) -> None:
+        if event.button == 1:
+            with suppress(NoMatches):
+                self.query_one("#prompt", PromptInput).focus()
 
     async def on_text_selected(self) -> None:
         """Optionally copy the current native Textual selection."""
@@ -1029,6 +1208,9 @@ class AxisTuiApp(App[None]):
 
     def on_unmount(self) -> None:
         """Do not leave an active provider/tool run behind the UI."""
+        if self._activity_timer is not None:
+            self._activity_timer.stop()
+            self._activity_timer = None
         if self.session.is_running:
             self.session.cancel()
 
@@ -1864,15 +2046,16 @@ class AxisTuiApp(App[None]):
         queued = self.query_one("#queued-messages", Static)
         queued.display = self.state.queued_message_count > 0
         queued.update(_render_queued_messages(self.state, theme=self.tui_settings.resolved_theme))
-        status = format_tui_status(
-            self.state,
-            model=self.session.model,
-            cwd=str(self.session.cwd),
+        self.query_one("#sidebar", SessionSidebar).update_from_session(
+            self.session,
+            theme=self.tui_settings.resolved_theme,
         )
-        if self._cancel_requested and self.state.running:
-            status = f"{status} · Cancelling"
-        self.query_one("#status", Static).update(status)
+        self.query_one("#compact-session-info", CompactSessionInfo).update_from_session(
+            self.session,
+            theme=self.tui_settings.resolved_theme,
+        )
         self._sync_activity_indicator()
+        self._refresh_footer_bindings()
 
     def _rebuild_completions(self, prompt: PromptInput) -> None:
         prefix = prompt.text[: prompt.cursor_position]
@@ -1996,6 +2179,20 @@ class AxisTuiApp(App[None]):
                 theme=self.tui_settings.resolved_theme,
             )
         )
+        self._refresh_footer_bindings()
+
+    def _refresh_footer_bindings(self) -> None:
+        try:
+            prompt = self.query_one("#prompt", PromptInput)
+        except NoMatches:
+            return
+        prompt.set_footer_mode(_prompt_footer_mode(self.state, self.completion_state))
+
+    def _update_responsive_layout(self, width: int, height: int) -> None:
+        self.set_class(
+            width < SIDEBAR_MIN_WIDTH or height < SIDEBAR_MIN_HEIGHT,
+            "-hide-sidebar",
+        )
 
 
 async def run_tui_app(
@@ -2003,13 +2200,130 @@ async def run_tui_app(
     *,
     tui_settings: TuiSettings | None = None,
     startup_message: str | None = None,
+    initial_prompt: str | None = None,
 ) -> None:
     """Run the basic Axis TUI in the caller's current async loop."""
     await AxisTuiApp(
         session,
         tui_settings=tui_settings if tui_settings is not None else load_tui_settings(),
         startup_message=startup_message,
+        initial_prompt=initial_prompt,
     ).run_async()
+
+
+def _prompt_footer_mode(
+    state: TuiState,
+    completion_state: CompletionState,
+) -> Literal["normal", "completion", "running"]:
+    if completion_state.items:
+        return "completion"
+    if state.running:
+        return "running"
+    return "normal"
+
+
+def _key_hint(key: str) -> str:
+    return "+".join(part.capitalize() for part in key.split("+"))
+
+
+def _prompt_bindings(
+    keybindings: TuiKeybindings,
+    *,
+    mode: Literal["normal", "completion", "running"],
+) -> list[Binding]:
+    if mode == "completion":
+        visible = [
+            Binding(
+                keybindings.accept_completion,
+                "accept_completion",
+                "Complete",
+                key_display=f"{_key_hint(keybindings.accept_completion)}/Enter",
+                priority=True,
+            ),
+            Binding(
+                keybindings.completion_next,
+                "completion_next",
+                "Choose",
+                key_display=(
+                    f"{_key_hint(keybindings.completion_previous)}/"
+                    f"{_key_hint(keybindings.completion_next)}"
+                ),
+                priority=True,
+            ),
+            Binding(keybindings.cancel, "cancel", "Close", priority=True),
+        ]
+        return [*visible, *_hidden_prompt_bindings(keybindings, visible)]
+    if mode == "running":
+        visible = [
+            Binding("enter", "submit_prompt", "Steer", priority=True),
+            Binding(
+                keybindings.queue_follow_up,
+                "submit_follow_up",
+                "Follow-up",
+                priority=True,
+            ),
+            Binding(keybindings.cancel, "cancel", "Cancel", priority=True),
+            Binding(
+                keybindings.toggle_thinking,
+                "toggle_thinking",
+                "Thinking",
+                priority=True,
+            ),
+            Binding(
+                keybindings.toggle_tool_results,
+                "toggle_tool_results",
+                "Tools",
+                priority=True,
+            ),
+        ]
+        return [*visible, *_hidden_prompt_bindings(keybindings, visible)]
+    visible = [
+        Binding("enter", "submit_prompt", "Submit", priority=True),
+        Binding("shift+enter", "insert_newline", "Newline", priority=True),
+        Binding(
+            keybindings.command_palette,
+            "open_command_palette",
+            "Commands",
+            priority=True,
+        ),
+        Binding(
+            keybindings.session_picker,
+            "open_session_picker",
+            "Sessions",
+            priority=True,
+        ),
+        Binding(keybindings.thinking_cycle, "cycle_thinking", "Thinking", priority=True),
+        Binding(keybindings.model_cycle, "cycle_model", "Model", priority=True),
+        Binding(keybindings.copy_message, "clear_prompt", "Clear", priority=True),
+        Binding(keybindings.quit, "quit", "Quit", priority=True),
+    ]
+    return [*visible, *_hidden_prompt_bindings(keybindings, visible)]
+
+
+def _hidden_prompt_bindings(
+    keybindings: TuiKeybindings,
+    visible: Sequence[Binding],
+) -> list[Binding]:
+    visible_keys = {key for binding in visible for key in binding.key.split(",")}
+    candidates = (
+        (keybindings.command_palette, "open_command_palette"),
+        (keybindings.session_picker, "open_session_picker"),
+        (keybindings.queue_follow_up, "submit_follow_up"),
+        (keybindings.thinking_cycle, "cycle_thinking"),
+        (keybindings.model_cycle, "cycle_model"),
+        (keybindings.toggle_tool_results, "toggle_tool_results"),
+        (keybindings.toggle_thinking, "toggle_thinking"),
+        (keybindings.copy_message, "clear_prompt"),
+        (keybindings.accept_completion, "accept_completion"),
+        (keybindings.completion_next, "completion_next"),
+        (keybindings.completion_previous, "completion_previous"),
+        (keybindings.quit, "quit"),
+    )
+    return [
+        Binding(key, action, show=False, priority=True)
+        for key, action in candidates
+        if key not in visible_keys
+    ]
 
 
 def _app_bindings(keybindings: TuiKeybindings) -> list[Binding]:
@@ -2180,6 +2494,7 @@ def _theme_css_variables(theme: TuiTheme) -> dict[str, str]:
         "axis-chrome-background": theme.chrome_background,
         "axis-chrome-text": theme.chrome_text,
         "axis-muted-text": theme.muted_text,
+        "axis-sidebar-background": theme.sidebar_background,
         "axis-border": theme.border,
         "axis-transcript-background": theme.transcript_background,
         "axis-prompt-background": theme.prompt_background,

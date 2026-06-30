@@ -38,6 +38,10 @@ from axis_coding.context import (
     ProjectContextFile,
     discover_project_context_with_diagnostics,
 )
+from axis_coding.context_window import (
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    estimate_context_tokens,
+)
 from axis_coding.credentials import FileCredentialStore, credentials_path
 from axis_coding.prompt_templates import (
     PromptTemplate,
@@ -160,6 +164,7 @@ class CodingSessionConfig:
     provider_settings: ProviderSettings | None = None
     runtime_provider_config: OpenAICompatibleProviderConfig | None = None
     thinking_level: ThinkingLevel = DEFAULT_THINKING_LEVEL
+    auto_compact_token_threshold: int | None = None
 
 
 class CodingSession:
@@ -381,6 +386,21 @@ class CodingSession:
         if provider.thinking_levels is None:
             return f"Provider {provider.name} does not declare thinking_levels"
         return f"{provider.name}:{self.model} is not declared in thinking_models"
+
+    @property
+    def context_token_estimate(self) -> int:
+        return estimate_context_tokens(system=self.system, messages=self.messages)
+
+    @property
+    def context_window_tokens(self) -> int:
+        provider = self._active_provider_config()
+        if provider is None:
+            return DEFAULT_CONTEXT_WINDOW_TOKENS
+        return provider.context_windows.get(self.model, DEFAULT_CONTEXT_WINDOW_TOKENS)
+
+    @property
+    def auto_compact_token_threshold(self) -> int | None:
+        return self._config.auto_compact_token_threshold
 
     @property
     def system(self) -> str:

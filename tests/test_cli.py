@@ -24,8 +24,19 @@ from axis_ai import (
     ProviderResponseStartEvent,
     ProviderTextDeltaEvent,
 )
-from axis_coding import AxisPaths, CodingSession, ResourceError, __version__
+from axis_coding import (
+    AxisPaths,
+    CodingSession,
+    FileCredentialStore,
+    OpenAICompatibleProviderConfig,
+    ProviderSettings,
+    ResourceError,
+    ScopedModelConfig,
+    SessionManager,
+    __version__,
+)
 from axis_coding.cli import (
+    _resolve_tui_startup_selection,
     app,
     run_deepseek_print_mode,
     run_deepseek_tui_mode,
@@ -131,7 +142,12 @@ def test_cli_without_prompt_launches_tui(
 ) -> None:
     observed: list[tuple[str, Path]] = []
 
-    async def fake_run_deepseek_tui_mode(*, model: str, cwd: Path) -> None:
+    async def fake_run_deepseek_tui_mode(
+        *,
+        model: str | None,
+        cwd: Path,
+        **_kwargs: object,
+    ) -> None:
         observed.append((model, cwd))
 
     monkeypatch.setattr("axis_coding.cli.run_deepseek_tui_mode", fake_run_deepseek_tui_mode)
@@ -144,6 +160,235 @@ def test_cli_without_prompt_launches_tui(
 
     assert result.exit_code == 0
     assert observed == [("deepseek-v4-flash", tmp_path.resolve())]
+
+
+def test_cli_positional_prompt_is_submitted_immediately_in_tui(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: list[dict[str, object]] = []
+
+    async def fake_run_deepseek_tui_mode(**kwargs: object) -> None:
+        observed.append(kwargs)
+
+    monkeypatch.setattr("axis_coding.cli.run_deepseek_tui_mode", fake_run_deepseek_tui_mode)
+
+    result = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(tmp_path),
+            "--provider",
+            "deepseek",
+            "--model",
+            "deepseek-v4-flash",
+            "--new-session",
+            "--auto-compact-threshold",
+            "64000",
+            "explain",
+            "this",
+            "repo",
+        ],
+        env={},
+    )
+
+    assert result.exit_code == 0
+    assert observed == [
+        {
+            "model": "deepseek-v4-flash",
+            "cwd": tmp_path.resolve(),
+            "session_id": None,
+            "new_session": True,
+            "provider_name": "deepseek",
+            "auto_compact_token_threshold": 64_000,
+            "initial_prompt": "explain this repo",
+        }
+    ]
+
+
+def test_cli_rejects_resume_with_new_session(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "--cwd",
+            str(tmp_path),
+            "--resume",
+            "session-1",
+            "--new-session",
+        ],
+        env={},
+    )
+
+    assert result.exit_code == 1
+    assert "--resume and --new-session cannot be used together" in result.stderr
+
+
+def test_tui_startup_falls_back_to_first_credentialed_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("AXIS_MISSING_DEFAULT_KEY", raising=False)
+    monkeypatch.delenv("AXIS_LOCAL_KEY", raising=False)
+    settings = ProviderSettings(
+        default_provider="default",
+        providers=(
+            OpenAICompatibleProviderConfig(
+                name="default",
+                base_url="https://default.invalid/v1",
+                api_key_env="AXIS_MISSING_DEFAULT_KEY",
+                credential_name="default",
+                models=("default-model",),
+                default_model="default-model",
+            ),
+            OpenAICompatibleProviderConfig(
+                name="local",
+                base_url="https://local.invalid/v1",
+                api_key_env="AXIS_LOCAL_KEY",
+                credential_name="local",
+                models=("local-model",),
+                default_model="local-model",
+            ),
+        ),
+    )
+    credential_store = FileCredentialStore(tmp_path / "credentials.json")
+    credential_store.set("local", "stored-key")
+
+    selection, resolved_settings = _resolve_tui_startup_selection(
+        settings,
+        record=None,
+        provider_name=None,
+        model=None,
+        credential_store=credential_store,
+    )
+
+    assert selection.provider.name == "local"
+    assert selection.model == "local-model"
+    assert resolved_settings == settings
+
+
+def test_tui_resume_without_provider_prefers_credentialed_scoped_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("AXIS_FIRST_KEY", raising=False)
+    monkeypatch.delenv("AXIS_SCOPED_KEY", raising=False)
+    settings = ProviderSettings(
+        default_provider="first",
+        providers=(
+            OpenAICompatibleProviderConfig(
+                name="first",
+                base_url="https://first.invalid/v1",
+                api_key_env="AXIS_FIRST_KEY",
+                credential_name="first",
+                models=("shared-model",),
+                default_model="shared-model",
+            ),
+            OpenAICompatibleProviderConfig(
+                name="scoped",
+                base_url="https://scoped.invalid/v1",
+                api_key_env="AXIS_SCOPED_KEY",
+                credential_name="scoped",
+                models=("shared-model",),
+                default_model="shared-model",
+            ),
+        ),
+        scoped_models=(ScopedModelConfig(provider="scoped", model="shared-model"),),
+    )
+    manager = SessionManager(
+        AxisPaths(
+            home=tmp_path / "axis-home",
+            agents_home=tmp_path / "agents-home",
+        )
+    )
+    record = manager.create_session(
+        cwd=tmp_path,
+        model="shared-model",
+        provider_name=None,
+        session_id="legacy-session",
+    )
+    credential_store = FileCredentialStore(tmp_path / "credentials.json")
+    credential_store.set("scoped", "stored-key")
+
+    selection, _settings = _resolve_tui_startup_selection(
+        settings,
+        record=record,
+        provider_name=None,
+        model=None,
+        credential_store=credential_store,
+    )
+
+    assert selection.provider.name == "scoped"
+    assert selection.model == "shared-model"
+
+    credential_store.set("first", "default-key")
+    new_selection, _settings = _resolve_tui_startup_selection(
+        settings,
+        record=None,
+        provider_name=None,
+        model=None,
+        credential_store=credential_store,
+    )
+    assert new_selection.provider.name == "first"
+
+
+def test_deepseek_tui_resumes_explicit_session_provider_and_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class ClosingFakeProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    paths = AxisPaths(
+        home=tmp_path / "axis-home",
+        agents_home=tmp_path / "agents-home",
+    )
+    manager = SessionManager(paths)
+    record = manager.create_session(
+        cwd=tmp_path,
+        model="resume-model",
+        provider_name="deepseek",
+        session_id="session-1",
+    )
+    provider = ClosingFakeProvider()
+    observed: list[tuple[str | None, str, str]] = []
+
+    async def fake_run_tui_app(
+        session: CodingSession,
+        *,
+        startup_message: str | None = None,
+        initial_prompt: str | None = None,
+    ) -> None:
+        del startup_message, initial_prompt
+        observed.append((session.session_id, session.provider_name, session.model))
+
+    monkeypatch.setattr(
+        "axis_coding.cli.create_model_provider",
+        lambda *_args, **_kwargs: provider,
+    )
+    monkeypatch.setattr(
+        "axis_coding.session.create_model_provider",
+        lambda *_args, **_kwargs: provider,
+    )
+    monkeypatch.setattr("axis_coding.cli.run_tui_app", fake_run_tui_app)
+
+    asyncio.run(
+        run_deepseek_tui_mode(
+            model=None,
+            cwd=tmp_path,
+            session_id=record.id,
+            paths=paths,
+            session_manager=manager,
+        )
+    )
+
+    assert observed == [("session-1", "deepseek", "resume-model")]
+    assert len(manager.list_sessions(tmp_path)) == 1
+    assert provider.closed is True
 
 
 def test_cli_composes_prompt_cwd_and_model(
@@ -348,8 +593,9 @@ def test_deepseek_tui_wrapper_owns_provider_and_persistent_session(
         session: CodingSession,
         *,
         startup_message: str | None = None,
+        initial_prompt: str | None = None,
     ) -> None:
-        del startup_message
+        del startup_message, initial_prompt
         observed_models.append(session.model)
         async for _event in session.prompt("TUI prompt"):
             pass
@@ -402,7 +648,9 @@ def test_deepseek_tui_opens_login_capable_ui_without_credentials(
         session: CodingSession,
         *,
         startup_message: str | None = None,
+        initial_prompt: str | None = None,
     ) -> None:
+        del initial_prompt
         observed.append((session.provider_name, startup_message))
 
     monkeypatch.setattr("axis_coding.cli.create_model_provider", missing_provider)
@@ -420,7 +668,7 @@ def test_deepseek_tui_opens_login_capable_ui_without_credentials(
     assert observed == [
         (
             "deepseek",
-            "Login required. Run /login or /login deepseek to save a DeepSeek API key.",
+            "Login required. Run /login to choose a provider, or /login deepseek to continue.",
         )
     ]
 

@@ -13,6 +13,12 @@ from axis_coding.context import (
     discover_project_context,
     discover_project_context_with_diagnostics,
 )
+from axis_coding.context_window import (
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    estimate_context_tokens,
+    estimate_message_tokens,
+    estimate_text_tokens,
+)
 from axis_coding.credentials import CredentialStoreError, FileCredentialStore, credentials_path
 from axis_coding.paths import AxisPaths
 from axis_coding.prompt_templates import (
@@ -142,6 +148,7 @@ __all__ = [
     "CommandResult",
     "OPERATING_PRINCIPLES",
     "DEFAULT_PROVIDER_NAME",
+    "DEFAULT_CONTEXT_WINDOW_TOKENS",
     "DEFAULT_THINKING_LEVEL",
     "FileCredentialStore",
     "LoginRequiredProvider",
@@ -187,6 +194,9 @@ __all__ = [
     "discover_project_context",
     "discover_project_context_with_diagnostics",
     "derive_markdown_description",
+    "estimate_context_tokens",
+    "estimate_message_tokens",
+    "estimate_text_tokens",
     "credentials_path",
     "default_session_export_path",
     "expand_prompt_template_command",

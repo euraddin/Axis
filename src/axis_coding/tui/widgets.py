@@ -1,10 +1,16 @@
-"""Selectable themed transcript widgets for Axis's Textual frontend."""
+"""Selectable transcript and responsive session widgets for Axis's TUI."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from subprocess import TimeoutExpired, run
+from typing import Any, Protocol
 
+from rich.align import Align
 from rich.console import Group, RenderableType
 from rich.markdown import Markdown
+from rich.padding import Padding
+from rich.rule import Rule
 from rich.style import Style
 from rich.syntax import Syntax
 from rich.table import Table
@@ -19,12 +25,238 @@ from axis_coding.tui.autocomplete import CompletionState
 from axis_coding.tui.config import AXIS_DARK_THEME, TuiRoleStyle, TuiTheme
 from axis_coding.tui.state import ChatItem, TuiState, visible_chat_text
 
+AXIS_SIDEBAR_LOGO = "A X I S"
+
 
 @dataclass(frozen=True, slots=True)
 class TranscriptLine:
     """Plain compatibility view of one rendered transcript line."""
 
     text: str
+
+
+class SessionSummarySource(Protocol):
+    @property
+    def cwd(self) -> Path: ...
+
+    @property
+    def model(self) -> str: ...
+
+    @property
+    def provider_name(self) -> str: ...
+
+    @property
+    def tools(self) -> Sequence[object]: ...
+
+    @property
+    def skills(self) -> Sequence[object]: ...
+
+    @property
+    def prompt_templates(self) -> Sequence[object]: ...
+
+    @property
+    def context_files(self) -> Sequence[object]: ...
+
+    @property
+    def context_token_estimate(self) -> int: ...
+
+    @property
+    def auto_compact_token_threshold(self) -> int | None: ...
+
+    @property
+    def context_window_tokens(self) -> int: ...
+
+    @property
+    def thinking_level(self) -> str: ...
+
+
+class SessionSidebar(Static):
+    """Wide-layout summary of the active Axis coding session."""
+
+    def update_from_session(
+        self,
+        session: SessionSummarySource,
+        *,
+        theme: TuiTheme = AXIS_DARK_THEME,
+    ) -> None:
+        self.update(render_session_sidebar(session, theme=theme))
+
+
+class CompactSessionInfo(Static):
+    """Single compact session row retained in narrow layouts."""
+
+    def update_from_session(
+        self,
+        session: SessionSummarySource,
+        *,
+        theme: TuiTheme = AXIS_DARK_THEME,
+    ) -> None:
+        self.update(render_compact_session_info(session, theme=theme))
+
+
+def render_session_sidebar(
+    session: SessionSummarySource,
+    *,
+    theme: TuiTheme = AXIS_DARK_THEME,
+) -> RenderableType:
+    """Render provider, context, tools and loaded project resources."""
+    metadata = Table.grid(padding=(0, 1))
+    metadata.add_column(style=theme.completion_description, no_wrap=True)
+    metadata.add_column(style=theme.prompt_text)
+    metadata.add_row("provider", session.provider_name)
+    metadata.add_row("model", session.model)
+    metadata.add_row("thinking", _thinking_level(session))
+    metadata.add_row("tools", str(len(session.tools)))
+    metadata.add_row("skills", str(len(session.skills)))
+
+    context = _bullet_list(
+        _context_file_labels(tuple(getattr(session, "context_files", ())), cwd=session.cwd),
+        empty="No context files",
+        theme=theme,
+    )
+    tools = _bullet_list(
+        _resource_names(tuple(getattr(session, "tools", ()))),
+        empty="No tools",
+        theme=theme,
+    )
+    skills = _bullet_list(
+        _resource_names(tuple(getattr(session, "skills", ()))),
+        empty="No skills loaded yet",
+        theme=theme,
+    )
+    prompts = _bullet_list(
+        _resource_names(tuple(getattr(session, "prompt_templates", ()))),
+        empty="No prompt templates",
+        theme=theme,
+    )
+    logo = Text(AXIS_SIDEBAR_LOGO, style=f"bold {theme.prompt_text}")
+    return Group(
+        Padding(Align.center(logo), (0, 0, 1, 0)),
+        _sidebar_section("session", metadata, theme=theme),
+        _sidebar_separator(theme=theme),
+        _sidebar_section("context", context, theme=theme),
+        _sidebar_separator(theme=theme),
+        _sidebar_section("tools", tools, theme=theme),
+        _sidebar_separator(theme=theme),
+        _sidebar_section("skills", skills, theme=theme),
+        _sidebar_separator(theme=theme),
+        _sidebar_section("prompts", prompts, theme=theme),
+    )
+
+
+def render_compact_session_info(
+    session: SessionSummarySource,
+    *,
+    theme: TuiTheme = AXIS_DARK_THEME,
+) -> RenderableType:
+    """Render cwd/branch, context, provider/model and thinking on one grid."""
+    left = Text(
+        f"{_short_path(session.cwd)} ({_git_branch(session.cwd)})",
+        style=theme.prompt_text,
+        overflow="fold",
+        no_wrap=False,
+    )
+    right = Text(style=theme.muted_text, overflow="fold", no_wrap=False, justify="right")
+    right.append(_context_usage(session), style=theme.completion_description)
+    right.append("  ")
+    right.append(f"{session.provider_name}:{session.model}", style=theme.prompt_text)
+    right.append(f" ({_thinking_level(session)})", style=theme.completion_description)
+    table = Table.grid(expand=True)
+    table.add_column(ratio=1)
+    table.add_column(ratio=1, justify="right")
+    table.add_row(left, right)
+    return table
+
+
+def _sidebar_section(title: str, body: RenderableType, *, theme: TuiTheme) -> RenderableType:
+    header = Text(title, style=f"bold {theme.accent}")
+    return Group(Padding(header, (0, 0, 0, 1)), Padding(body, (0, 0, 1, 1)))
+
+
+def _sidebar_separator(*, theme: TuiTheme) -> RenderableType:
+    return Padding(Rule(style=theme.border), (0, 0, 1, 0))
+
+
+def _resource_names(items: Sequence[object]) -> list[str]:
+    return [str(name) for item in items if (name := getattr(item, "name", None))]
+
+
+def _bullet_list(items: Sequence[str], *, empty: str, theme: TuiTheme) -> Text:
+    rendered = Text()
+    if not items:
+        rendered.append(empty, style=theme.completion_description)
+        return rendered
+    for index, item in enumerate(items):
+        if index:
+            rendered.append("\n")
+        rendered.append("• ", style=theme.completion_description)
+        rendered.append(item, style=theme.prompt_text)
+    return rendered
+
+
+def _context_file_labels(items: Sequence[object], *, cwd: Path) -> list[str]:
+    labels: list[str] = []
+    for item in items:
+        raw = getattr(item, "path", None)
+        if not isinstance(raw, str | Path):
+            continue
+        path = Path(raw).expanduser()
+        absolute = path if path.is_absolute() else cwd / path
+        try:
+            labels.append(str(absolute.resolve().relative_to(cwd.resolve())))
+        except OSError, ValueError:
+            labels.append(_short_path(absolute))
+    return labels
+
+
+def _context_usage(session: SessionSummarySource) -> str:
+    threshold = session.auto_compact_token_threshold
+    limit = session.context_window_tokens if threshold is None or threshold <= 0 else threshold
+    return (
+        f"{_compact_token_count(session.context_token_estimate)}"
+        f"/{_compact_token_count(limit)} context"
+    )
+
+
+def _compact_token_count(value: int) -> str:
+    if value <= 0:
+        return "0k"
+    if value < 1000:
+        return "<1k"
+    return f"{(value + 500) // 1000}k"
+
+
+def _thinking_level(session: SessionSummarySource) -> str:
+    available = getattr(session, "available_thinking_levels", None)
+    if available == ():
+        return "unavailable"
+    explicit_level = getattr(session, "thinking_level", None)
+    if explicit_level:
+        return str(explicit_level)
+    state = getattr(session, "state", None)
+    thinking_level = getattr(state, "thinking_level", None)
+    return str(thinking_level) if thinking_level else "--"
+
+
+def _git_branch(cwd: Path) -> str:
+    try:
+        result = run(
+            ["git", "-C", str(cwd), "branch", "--show-current"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=0.5,
+        )
+    except OSError, TimeoutExpired:
+        return "--"
+    return result.stdout.strip() or "--"
+
+
+def _short_path(path: Path) -> str:
+    try:
+        return f"~/{path.relative_to(Path.home())}"
+    except ValueError:
+        return str(path)
 
 
 class NonSelectableStatic(Static):
