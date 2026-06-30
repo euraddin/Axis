@@ -7,6 +7,8 @@ import pytest
 
 from axis_agent import (
     AssistantMessage,
+    BranchSummaryEntry,
+    CompactionEntry,
     JsonlSessionStorage,
     LeafEntry,
     MessageEntry,
@@ -14,6 +16,7 @@ from axis_agent import (
     SessionInfoEntry,
     SessionState,
     SessionTreeError,
+    ThinkingLevelChangeEntry,
     ToolCall,
     ToolResultMessage,
     UserMessage,
@@ -102,6 +105,62 @@ def test_session_state_can_select_explicit_empty_leaf() -> None:
     assert state.active_leaf_id is None
     assert state.session_info is not None
     assert state.entries == ()
+
+
+def test_session_state_replays_full_and_partial_compaction() -> None:
+    old_user = MessageEntry(id="old-user", message=UserMessage(content="Old request"))
+    old_assistant = MessageEntry(
+        id="old-assistant",
+        parent_id="old-user",
+        message=AssistantMessage(content="Old answer"),
+    )
+    recent = MessageEntry(
+        id="recent",
+        parent_id="old-assistant",
+        message=UserMessage(content="Recent request"),
+    )
+    compact = CompactionEntry(
+        id="compact",
+        parent_id="recent",
+        summary="Older work was summarized.",
+        replaces_entry_ids=["old-user", "old-assistant"],
+    )
+
+    state = SessionState.from_entries([old_user, old_assistant, recent, compact])
+
+    assert state.messages == (
+        UserMessage(content="Previous conversation summary:\nOlder work was summarized."),
+        UserMessage(content="Recent request"),
+    )
+    assert state.context_entry_ids == ("compact", "recent")
+    assert state.compaction_entries == (compact,)
+
+
+def test_branch_summary_replaces_earlier_path_context() -> None:
+    root = MessageEntry(id="root", message=UserMessage(content="Root request"))
+    answer = MessageEntry(
+        id="answer",
+        parent_id="root",
+        message=AssistantMessage(content="Old answer"),
+    )
+    summary = BranchSummaryEntry(
+        id="summary",
+        parent_id="answer",
+        branch_root_id="answer",
+        summary="The abandoned branch explored another design.",
+    )
+
+    state = SessionState.from_entries([root, answer, summary], leaf_id="summary")
+
+    assert state.messages == (
+        UserMessage(
+            content=(
+                "The following is a summary of a branch that this conversation came back from:\n"
+                "<summary>\nThe abandoned branch explored another design.\n</summary>"
+            )
+        ),
+    )
+    assert state.context_entry_ids == ("summary",)
 
 
 def test_single_chain_without_leaf_pointer_is_inferred() -> None:
@@ -327,3 +386,44 @@ def test_process_restart_restores_exact_transcript_and_provider_data(
     restored_tool_request = state.messages[1]
     assert isinstance(restored_tool_request, AssistantMessage)
     assert restored_tool_request.provider_data == {"reasoning_content": "I should read the file."}
+
+
+def test_session_state_replays_thinking_level_on_active_path() -> None:
+    root = MessageEntry(id="root", message=UserMessage(content="Hello"))
+    thinking = ThinkingLevelChangeEntry(
+        id="thinking",
+        parent_id="root",
+        thinking_level="high",
+    )
+
+    state = SessionState.from_entries([root, thinking, LeafEntry(entry_id="thinking")])
+
+    assert state.thinking_level == "high"
+
+
+def test_branch_summary_replaces_messages_but_preserves_model_metadata() -> None:
+    model = ModelChangeEntry(id="model", model="deepseek-v4-fast")
+    thinking = ThinkingLevelChangeEntry(
+        id="thinking",
+        parent_id="model",
+        thinking_level="high",
+    )
+    abandoned = MessageEntry(
+        id="abandoned",
+        parent_id="thinking",
+        message=UserMessage(content="Old direction"),
+    )
+    summary = BranchSummaryEntry(
+        id="summary",
+        parent_id="abandoned",
+        summary="Preserved branch context.",
+    )
+
+    state = SessionState.from_entries(
+        [model, thinking, abandoned, summary, LeafEntry(entry_id="summary")]
+    )
+
+    assert state.model == "deepseek-v4-fast"
+    assert state.thinking_level == "high"
+    assert len(state.messages) == 1
+    assert "Preserved branch context." in state.messages[0].content

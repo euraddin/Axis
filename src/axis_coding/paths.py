@@ -57,6 +57,10 @@ class AxisPaths:
         """Return a fresh session path without touching the filesystem."""
         return self.session_path(cwd, uuid4().hex)
 
+    def default_session_path(self, cwd: Path) -> Path:
+        """Return the stable default-session file for one working directory."""
+        return self.project_session_dir(cwd) / "default.jsonl"
+
 
 def _slugify_path(path: Path, *, max_length: int = 72) -> str:
     parts = [part for part in path.parts if part not in {path.anchor, ""}]

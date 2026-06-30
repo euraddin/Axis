@@ -4,13 +4,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final, cast, overload
 
-from axis_agent.messages import AgentMessage
+from axis_agent.messages import AgentMessage, UserMessage
 from axis_agent.session.entries import (
+    BranchSummaryEntry,
+    CompactionEntry,
     LeafEntry,
     MessageEntry,
     ModelChangeEntry,
     SessionEntry,
     SessionInfoEntry,
+    ThinkingLevelChangeEntry,
 )
 from axis_agent.session.storage import SessionStorage
 from axis_agent.session.tree import infer_active_leaf, path_to_entry, validate_session_tree
@@ -24,8 +27,10 @@ class SessionState:
 
     messages: tuple[AgentMessage, ...]
     model: str | None
+    thinking_level: str | None
     active_leaf_id: str | None
     session_info: SessionInfoEntry | None
+    compaction_entries: tuple[CompactionEntry, ...]
     context_entry_ids: tuple[str, ...]
     entries: tuple[SessionEntry, ...]
 
@@ -57,27 +62,56 @@ class SessionState:
         else:
             active_leaf_id = cast(str | None, leaf_id)
 
-        replay_entries = path_to_entry(entries, active_leaf_id)
-        messages: list[AgentMessage] = []
-        context_entry_ids: list[str] = []
-        model: str | None = None
+        full_replay_entries = path_to_entry(entries, active_leaf_id)
+        model = next(
+            (
+                entry.model
+                for entry in reversed(full_replay_entries)
+                if isinstance(entry, ModelChangeEntry)
+            ),
+            None,
+        )
+        thinking_level = next(
+            (
+                entry.thinking_level
+                for entry in reversed(full_replay_entries)
+                if isinstance(entry, ThinkingLevelChangeEntry)
+            ),
+            None,
+        )
+        replay_entries = full_replay_entries
+        latest_branch_summary_index = _latest_branch_summary_index(replay_entries)
+        if latest_branch_summary_index is not None:
+            replay_entries = replay_entries[latest_branch_summary_index:]
+
+        message_rows: list[tuple[str, AgentMessage]] = []
+        compaction_entries: list[CompactionEntry] = []
         for entry in replay_entries:
             if isinstance(entry, MessageEntry):
-                messages.append(entry.message)
-                context_entry_ids.append(entry.id)
-            elif isinstance(entry, ModelChangeEntry):
-                model = entry.model
+                message_rows.append((entry.id, entry.message))
+            elif isinstance(entry, CompactionEntry):
+                compaction_entries.append(entry)
+                message_rows = _apply_compaction(message_rows, entry)
+            elif isinstance(entry, BranchSummaryEntry):
+                message_rows.append(
+                    (
+                        entry.id,
+                        UserMessage(content=_format_branch_summary(entry.summary)),
+                    )
+                )
 
         session_info = next(
             (entry for entry in reversed(entries) if isinstance(entry, SessionInfoEntry)),
             None,
         )
         return cls(
-            messages=tuple(messages),
+            messages=tuple(message for _entry_id, message in message_rows),
             model=model,
+            thinking_level=thinking_level,
             active_leaf_id=active_leaf_id,
             session_info=session_info,
-            context_entry_ids=tuple(context_entry_ids),
+            compaction_entries=tuple(compaction_entries),
+            context_entry_ids=tuple(entry_id for entry_id, _message in message_rows),
             entries=tuple(replay_entries),
         )
 
@@ -112,4 +146,51 @@ def _latest_leaf_pointer(entries: Sequence[SessionEntry]) -> LeafEntry | None:
     return next(
         (entry for entry in reversed(entries) if isinstance(entry, LeafEntry)),
         None,
+    )
+
+
+def _latest_branch_summary_index(entries: Sequence[SessionEntry]) -> int | None:
+    return next(
+        (
+            index
+            for index in range(len(entries) - 1, -1, -1)
+            if isinstance(entries[index], BranchSummaryEntry)
+        ),
+        None,
+    )
+
+
+def _apply_compaction(
+    rows: list[tuple[str, AgentMessage]],
+    entry: CompactionEntry,
+) -> list[tuple[str, AgentMessage]]:
+    replaced = set(entry.replaces_entry_ids)
+    retained: list[tuple[str, AgentMessage]] = []
+    inserted = False
+    for entry_id, message in rows:
+        if entry_id not in replaced:
+            retained.append((entry_id, message))
+            continue
+        if not inserted:
+            retained.append(
+                (
+                    entry.id,
+                    UserMessage(content=f"Previous conversation summary:\n{entry.summary}"),
+                )
+            )
+            inserted = True
+    if not inserted:
+        retained.append(
+            (
+                entry.id,
+                UserMessage(content=f"Previous conversation summary:\n{entry.summary}"),
+            )
+        )
+    return retained
+
+
+def _format_branch_summary(summary: str) -> str:
+    return (
+        "The following is a summary of a branch that this conversation came back from:\n"
+        f"<summary>\n{summary}\n</summary>"
     )

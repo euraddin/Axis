@@ -1,11 +1,16 @@
-"""Headless Textual tests for Axis's basic interactive frontend."""
+"""Headless tests for Axis's Tau-style transcript frontend."""
 
 import asyncio
 from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 
-from textual.widgets import Input
+import pytest
+from textual.geometry import Offset
+from textual.selection import SELECT_ALL, Selection
+from textual.widgets import Input, ListView, Static, TextArea
 
+import axis_coding.tui.app as tui_app
 from axis_agent import (
     AgentEndEvent,
     AgentEvent,
@@ -15,9 +20,14 @@ from axis_agent import (
     AssistantMessage,
     ErrorEvent,
     JsonlSessionStorage,
+    LeafEntry,
+    MessageEntry,
+    QueueUpdateEvent,
     ToolCall,
+    ToolResultMessage,
     TurnEndEvent,
     TurnStartEvent,
+    UserMessage,
 )
 from axis_agent.types import JSONValue
 from axis_ai import (
@@ -27,8 +37,38 @@ from axis_ai import (
     ProviderTextDeltaEvent,
     ProviderThinkingDeltaEvent,
 )
-from axis_coding import CodingSession, CodingSessionConfig
-from axis_coding.tui import AxisTuiApp, TuiMessageItem, TuiNoticeItem, TuiToolItem
+from axis_coding import (
+    AxisPaths,
+    AxisResourcePaths,
+    CodingSession,
+    CodingSessionConfig,
+    FileCredentialStore,
+    ModelChoice,
+    ProviderSettings,
+    ScopedModelConfig,
+    SessionManager,
+    TerminalCommandResult,
+    builtin_provider_entry,
+    load_provider_settings,
+)
+from axis_coding.prompt_templates import PromptTemplate
+from axis_coding.skills import Skill
+from axis_coding.tui import (
+    AxisTuiApp,
+    BranchSummaryInstructionsScreen,
+    CommandOutputScreen,
+    LoginProviderPickerScreen,
+    LoginScreen,
+    ModelPickerScreen,
+    PromptInput,
+    SessionPickerScreen,
+    StreamingTranscriptMessageWidget,
+    ThemePickerScreen,
+    TranscriptMessageWidget,
+    TranscriptView,
+    TreePickerScreen,
+)
+from axis_coding.tui.config import TuiKeybindings, TuiSettings
 
 
 async def wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> None:
@@ -40,17 +80,166 @@ async def wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> 
         await asyncio.sleep(0.01)
 
 
-def test_tui_submits_prompt_and_renders_streamed_thinking_and_text(
-    tmp_path: Path,
-) -> None:
+class CancellableSession:
+    def __init__(
+        self,
+        cwd: Path,
+        *,
+        messages: tuple[UserMessage | AssistantMessage | ToolResultMessage, ...] = (),
+    ) -> None:
+        self.cwd = cwd
+        self.model = "fake"
+        self.provider_name = "deepseek"
+        self.available_models = ("fake", "fake-fast")
+        self.available_providers = ("deepseek",)
+        self.available_model_choices = (
+            ModelChoice("deepseek", "fake"),
+            ModelChoice("deepseek", "fake-fast"),
+        )
+        self.scoped_model_choices = self.available_model_choices
+        self.thinking_level = "high"
+        self.available_thinking_levels = ("high", "xhigh")
+        self.thinking_unavailable_reason = None
+        self.messages = messages
+        self.skills = ()
+        self.prompt_templates = ()
+        self._running = False
+        self.cancel_called = False
+        self._cancel_event = asyncio.Event()
+        self.queued_steering_messages: tuple[str, ...] = ()
+        self.queued_follow_up_messages: tuple[str, ...] = ()
+        self.terminal_commands: list[tuple[str, bool]] = []
+        self.model_changes: list[ModelChoice] = []
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    async def prompt(
+        self,
+        content: str,
+        *,
+        streaming_behavior: str | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        if streaming_behavior == "steer":
+            self.queued_steering_messages = (*self.queued_steering_messages, content)
+            yield self.queue_update_event()
+            return
+        if streaming_behavior == "follow_up":
+            self.queued_follow_up_messages = (*self.queued_follow_up_messages, content)
+            yield self.queue_update_event()
+            return
+        self._running = True
+        try:
+            yield AgentStartEvent()
+            yield TurnStartEvent(turn=1)
+            await self._cancel_event.wait()
+            yield ErrorEvent(message="Agent run cancelled", recoverable=True)
+            yield TurnEndEvent(turn=1)
+            yield AgentEndEvent()
+        finally:
+            self._running = False
+
+    async def set_model_choice(self, choice: ModelChoice) -> str:
+        self.model_changes.append(choice)
+        self.provider_name = choice.provider_name
+        self.model = choice.model
+        return f"Current model: {choice.provider_name}:{choice.model}"
+
+    async def cycle_scoped_model(self) -> ModelChoice:
+        current = ModelChoice(self.provider_name, self.model)
+        index = self.scoped_model_choices.index(current)
+        selected = self.scoped_model_choices[(index + 1) % len(self.scoped_model_choices)]
+        await self.set_model_choice(selected)
+        return selected
+
+    async def set_thinking_level(self, level: str) -> str:
+        self.thinking_level = level
+        return f"Thinking mode: {level}"
+
+    async def cycle_thinking_level(self) -> str:
+        index = self.available_thinking_levels.index(self.thinking_level)
+        self.thinking_level = self.available_thinking_levels[
+            (index + 1) % len(self.available_thinking_levels)
+        ]
+        return f"Thinking mode: {self.thinking_level}"
+
+    def toggle_scoped_model(self, choice: ModelChoice) -> tuple[ModelChoice, ...]:
+        if choice in self.scoped_model_choices:
+            self.scoped_model_choices = tuple(
+                item for item in self.scoped_model_choices if item != choice
+            )
+        else:
+            self.scoped_model_choices = (*self.scoped_model_choices, choice)
+        return self.scoped_model_choices
+
+    def reload_provider_settings(self) -> None:
+        return None
+
+    def cancel(self) -> None:
+        self.cancel_called = True
+        self._cancel_event.set()
+
+    def queue_update_event(self) -> QueueUpdateEvent:
+        return QueueUpdateEvent(
+            steering=self.queued_steering_messages,
+            follow_up=self.queued_follow_up_messages,
+        )
+
+    def pop_latest_follow_up_message(self) -> str | None:
+        if not self.queued_follow_up_messages:
+            return None
+        message = self.queued_follow_up_messages[-1]
+        self.queued_follow_up_messages = self.queued_follow_up_messages[:-1]
+        return message
+
+    async def run_terminal_command(
+        self,
+        command: str,
+        *,
+        add_to_context: bool,
+    ) -> TerminalCommandResult:
+        self.terminal_commands.append((command, add_to_context))
+        return TerminalCommandResult(
+            command=command,
+            output="command output",
+            exit_code=0,
+            ok=True,
+            added_to_context=add_to_context,
+        )
+
+
+def test_tui_app_uses_theme_variables_and_configured_keys(tmp_path: Path) -> None:
+    settings = TuiSettings(
+        keybindings=TuiKeybindings(
+            cancel="f4",
+            toggle_tool_results="f8",
+            toggle_thinking="f9",
+            quit="f10",
+        ),
+        theme="high-contrast",
+    )
+    app = AxisTuiApp(CancellableSession(tmp_path), tui_settings=settings)
+
+    variables = app.get_theme_variable_defaults()
+    assert variables["axis-screen-text"] == "#ffffff"
+    assert variables["axis-accent"] == "#ffb454"
+    assert variables["axis-markdown-inline-code"] == "#7fffd4"
+    assert app._bindings.key_to_bindings["f4"][0].action == "cancel_run"
+    assert app._bindings.key_to_bindings["f8"][0].action == "toggle_tool_results"
+    assert app._bindings.key_to_bindings["f9"][0].action == "toggle_thinking"
+    assert app._bindings.key_to_bindings["f10"][0].action == "exit_app"
+
+
+def test_tui_submits_and_renders_streamed_thinking_and_markdown(tmp_path: Path) -> None:
     async def scenario() -> None:
         provider = FakeProvider(
             [
                 [
                     ProviderResponseStartEvent(model="fake"),
                     ProviderThinkingDeltaEvent(delta="Inspect first."),
-                    ProviderTextDeltaEvent(delta="Done"),
-                    ProviderResponseEndEvent(message=AssistantMessage(content="Done")),
+                    ProviderTextDeltaEvent(delta="## Done\n\n- one"),
+                    ProviderResponseEndEvent(message=AssistantMessage(content="## Done\n\n- one")),
                 ]
             ]
         )
@@ -66,30 +255,31 @@ def test_tui_submits_prompt_and_renders_streamed_thinking_and_text(
         app = AxisTuiApp(session)
 
         async with app.run_test(size=(100, 30)) as pilot:
-            prompt = app.query_one("#prompt", Input)
+            prompt = app.query_one("#prompt", PromptInput)
             prompt.value = "Hello Axis"
             await pilot.press("enter")
             await wait_until(lambda: len(provider.calls) == 1 and not prompt.disabled)
 
-            messages = [item for item in app.state.items if isinstance(item, TuiMessageItem)]
-            assert [(item.role, item.text) for item in messages] == [
+            assert [(item.role, item.text) for item in app.state.items] == [
                 ("user", "Hello Axis"),
                 ("thinking", "Inspect first."),
-                ("assistant", "Done"),
+                ("assistant", "## Done\n\n- one"),
             ]
-            assert app.state.running is False
-            assert prompt.value == ""
+            transcript = app.query_one("#transcript", TranscriptView)
+            rendered = "\n".join(line.text for line in transcript.lines)
+            assert "Thinking… Press Ctrl+T" in rendered
+            assert "Inspect first." not in rendered
+            assert "## Done" in rendered
             assert prompt.has_focus is True
 
     asyncio.run(scenario())
 
 
-def test_tui_surfaces_prompt_expansion_errors_and_reenables_input(tmp_path: Path) -> None:
+def test_tui_surfaces_prompt_expansion_errors(tmp_path: Path) -> None:
     async def scenario() -> None:
-        provider = FakeProvider([])
         session = await CodingSession.load(
             CodingSessionConfig(
-                provider=provider,
+                provider=FakeProvider([]),
                 model="fake",
                 storage=JsonlSessionStorage(tmp_path / "session.jsonl"),
                 cwd=tmp_path,
@@ -99,21 +289,88 @@ def test_tui_surfaces_prompt_expansion_errors_and_reenables_input(tmp_path: Path
         app = AxisTuiApp(session)
 
         async with app.run_test() as pilot:
-            prompt = app.query_one("#prompt", Input)
+            prompt = app.query_one("#prompt", PromptInput)
             prompt.value = "/skill:missing"
             await pilot.press("enter")
             await wait_until(lambda: app.state.error is not None and not prompt.disabled)
 
             assert app.state.error == "Unknown skill: missing"
-            assert provider.calls == []
-            notice = app.state.items[-1]
-            assert isinstance(notice, TuiNoticeItem)
-            assert notice.level == "error"
+            assert app.state.items[-1].role == "error"
+            assert app.state.items[-1].text == "Error: Unknown skill: missing"
 
     asyncio.run(scenario())
 
 
-def test_tui_tracks_a_complete_tool_round_trip(tmp_path: Path) -> None:
+def test_tui_completion_accepts_before_submitting(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = CancellableSession(tmp_path)
+        session.skills = (
+            Skill(
+                name="review",
+                path=tmp_path / "review" / "SKILL.md",
+                content="Review code.",
+                description="Review code",
+            ),
+        )
+        session.prompt_templates = (
+            PromptTemplate(
+                name="explain",
+                path=tmp_path / "explain.md",
+                content="Explain code.",
+                description="Explain code",
+            ),
+        )
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/skill:r"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.pause()
+
+            assert [item.display for item in app.completion_state.items] == ["/skill:review"]
+            await pilot.press("enter")
+            await pilot.pause()
+            assert prompt.value == "/skill:review"
+            assert session.is_running is False
+
+            prompt.value = "/expl"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.pause()
+            assert prompt.value == "/explain"
+
+    asyncio.run(scenario())
+
+
+def test_tui_prompt_is_multiline_and_file_completion_uses_cursor(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        (tmp_path / "README.md").write_text("# Axis\n", encoding="utf-8")
+        app = AxisTuiApp(CancellableSession(tmp_path))
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "Read @READ after"
+            prompt.cursor_position = len("Read @READ")
+            app._rebuild_completions(prompt)
+
+            assert [item.display for item in app.completion_state.items] == ["@README.md"]
+            await pilot.press("tab")
+            await pilot.pause()
+            assert prompt.value == "Read @README.md after"
+
+            prompt.value = "first"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("shift+enter")
+            await pilot.press("s", "e", "c", "o", "n", "d")
+            await pilot.pause()
+            assert prompt.value == "first\nsecond"
+
+    asyncio.run(scenario())
+
+
+def test_tui_tracks_complete_tool_round_trip(tmp_path: Path) -> None:
     async def scenario() -> None:
         async def execute(
             arguments: Mapping[str, JSONValue],
@@ -146,49 +403,136 @@ def test_tui_tracks_a_complete_tool_round_trip(tmp_path: Path) -> None:
         app = AxisTuiApp(session)
 
         async with app.run_test() as pilot:
-            prompt = app.query_one("#prompt", Input)
+            prompt = app.query_one("#prompt", PromptInput)
             prompt.value = "Read README"
             await pilot.press("enter")
             await wait_until(lambda: len(provider.calls) == 2 and not prompt.disabled)
 
-            tool_items = [item for item in app.state.items if isinstance(item, TuiToolItem)]
+            tool_items = [item for item in app.state.items if item.role == "tool"]
             assert len(tool_items) == 1
-            assert tool_items[0].status == "succeeded"
-            assert tool_items[0].result is not None
-            assert tool_items[0].result.tool_call_id == "call-1"
-            assert tool_items[0].result.content == "contents of README.md"
+            assert tool_items[0].text == "→ read README.md"
+            assert tool_items[0].tool_call_id == "call-1"
+            assert tool_items[0].tool_result_text == "✓ read\ncontents of README.md"
 
     asyncio.run(scenario())
 
 
-class CancellableSession:
-    def __init__(self, cwd: Path) -> None:
-        self.cwd = cwd
-        self.model = "fake"
-        self._running = False
-        self.cancel_called = False
-        self._cancel_event = asyncio.Event()
+def test_tui_loads_restored_messages_into_transcript(tmp_path: Path) -> None:
+    call = ToolCall(id="call-1", name="edit", arguments={"path": "README.md"})
+    session = CancellableSession(
+        tmp_path,
+        messages=(
+            UserMessage(content="Read the file"),
+            AssistantMessage(content="Inspecting", tool_calls=[call]),
+            ToolResultMessage(
+                tool_call_id="call-1",
+                name="edit",
+                content="Changed",
+                data={"patch": "--- README.md\n+++ README.md"},
+            ),
+        ),
+    )
 
-    @property
-    def is_running(self) -> bool:
-        return self._running
+    app = AxisTuiApp(session)
 
-    async def prompt(self, content: str) -> AsyncIterator[AgentEvent]:
-        del content
-        self._running = True
-        try:
-            yield AgentStartEvent()
-            yield TurnStartEvent(turn=1)
-            await self._cancel_event.wait()
-            yield ErrorEvent(message="Agent run cancelled", recoverable=True)
-            yield TurnEndEvent(turn=1)
-            yield AgentEndEvent()
-        finally:
-            self._running = False
+    assert [(item.role, item.text) for item in app.state.items] == [
+        ("user", "Read the file"),
+        ("assistant", "Inspecting"),
+        ("tool", "→ edit README.md"),
+    ]
+    assert app.state.items[-1].tool_result_text is not None
+    assert "Patch:" in app.state.items[-1].tool_result_text
 
-    def cancel(self) -> None:
-        self.cancel_called = True
-        self._cancel_event.set()
+
+def test_transcript_widget_extracts_plain_text_selection(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(
+            CancellableSession(tmp_path, messages=(UserMessage(content="alpha beta\ngamma"),))
+        )
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            widget = app.query_one(TranscriptMessageWidget)
+            assert widget.get_selection(Selection(Offset(6, 0), Offset(10, 0))) == (
+                "beta",
+                "\n",
+            )
+
+    asyncio.run(scenario())
+
+
+def test_tui_auto_copy_selection_is_configurable(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(
+            CancellableSession(tmp_path, messages=(UserMessage(content="copy this"),)),
+            tui_settings=TuiSettings(auto_copy_selection=True),
+        )
+        copied: list[str] = []
+        app.copy_to_clipboard = copied.append  # type: ignore[method-assign]
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            message = app.query_one(TranscriptMessageWidget)
+            app.screen.selections = {message: SELECT_ALL}
+            await app.on_text_selected()
+
+        assert copied == ["copy this"]
+
+    asyncio.run(scenario())
+
+
+def test_tui_toggles_tool_results_and_thinking(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        call = ToolCall(id="call-1", name="read", arguments={"path": "README.md"})
+        session = CancellableSession(
+            tmp_path,
+            messages=(
+                AssistantMessage(
+                    content="answer",
+                    tool_calls=[call],
+                    provider_data={"reasoning_content": "internal plan"},
+                ),
+                ToolResultMessage(
+                    tool_call_id="call-1",
+                    name="read",
+                    content="README contents",
+                ),
+            ),
+        )
+        app = AxisTuiApp(session)
+        app.state.add_thinking_delta("internal plan")
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            transcript = app.query_one("#transcript", TranscriptView)
+
+            def visible_text() -> str:
+                return "\n".join(line.text for line in transcript.lines)
+
+            assert "README contents" not in visible_text()
+            assert "internal plan" not in visible_text()
+            await pilot.press("ctrl+o")
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            assert app.state.show_tool_results is True
+            assert app.state.show_thinking is True
+            assert "README contents" in visible_text()
+            assert "internal plan" in visible_text()
+
+    asyncio.run(scenario())
+
+
+def test_streaming_widget_is_reused_for_multiple_deltas(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(CancellableSession(tmp_path))
+        async with app.run_test(size=(80, 24)) as pilot:
+            transcript = app.query_one("#transcript", TranscriptView)
+            await transcript.append_assistant_delta("alpha ")
+            await transcript.append_assistant_delta("beta")
+            await pilot.pause()
+            widgets = list(app.query(StreamingTranscriptMessageWidget))
+            assert len(widgets) == 1
+            assert widgets[0].selection_text == "alpha beta"
+
+    asyncio.run(scenario())
 
 
 def test_escape_requests_cooperative_cancellation(tmp_path: Path) -> None:
@@ -197,7 +541,7 @@ def test_escape_requests_cooperative_cancellation(tmp_path: Path) -> None:
         app = AxisTuiApp(session)
 
         async with app.run_test() as pilot:
-            prompt = app.query_one("#prompt", Input)
+            prompt = app.query_one("#prompt", PromptInput)
             prompt.value = "Long task"
             await pilot.press("enter")
             await wait_until(lambda: session.is_running)
@@ -207,22 +551,886 @@ def test_escape_requests_cooperative_cancellation(tmp_path: Path) -> None:
             assert session.cancel_called is True
             assert app.state.error is None
             assert app.state.running is False
-            assert any(
-                isinstance(item, TuiNoticeItem) and item.text == "Agent run cancelled."
-                for item in app.state.items
-            )
+            assert any(item.text == "Agent run cancelled." for item in app.state.items)
 
     asyncio.run(scenario())
 
 
 def test_ctrl_d_exits_the_app(tmp_path: Path) -> None:
     async def scenario() -> None:
-        session = CancellableSession(tmp_path)
-        app = AxisTuiApp(session)
-
+        app = AxisTuiApp(CancellableSession(tmp_path))
         async with app.run_test() as pilot:
             assert app.is_running is True
             await pilot.press("ctrl+d")
             await wait_until(lambda: not app.is_running)
+
+    asyncio.run(scenario())
+
+
+def test_terminal_command_prefix_detects_shell_mode() -> None:
+    assert tui_app._terminal_command_prefix_span("! pwd") == (0, 1)
+    assert tui_app._terminal_command_prefix_span("!! pwd") == (0, 2)
+    assert tui_app._terminal_command_prefix_span("  !! pwd") == (2, 4)
+    assert tui_app._terminal_command_prefix_span("hello ! pwd") is None
+
+
+def test_tui_shell_mode_highlights_prefix_and_enables_path_completion(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        (tmp_path / "README.md").write_text("# Axis\n", encoding="utf-8")
+        app = AxisTuiApp(CancellableSession(tmp_path))
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "!! cat READ"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.pause()
+
+            assert prompt.has_class("-shell-mode")
+            assert prompt.get_line(0).spans[-1].start == 0
+            assert prompt.get_line(0).spans[-1].end == 2
+            assert [item.display for item in app.completion_state.items] == ["README.md"]
+
+            await pilot.press("tab")
+            assert prompt.value == "!! cat README.md"
+
+    asyncio.run(scenario())
+
+
+def test_tui_queues_steering_and_follow_up_while_running(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = CancellableSession(tmp_path)
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "long task"
+            await pilot.press("enter")
+            await wait_until(lambda: session.is_running)
+
+            prompt.value = "adjust course\nwith detail"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert session.queued_steering_messages == ("adjust course\nwith detail",)
+            assert app.state.queued_steering == session.queued_steering_messages
+
+            prompt.value = "after this\nrun tests"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("alt+enter")
+            await pilot.pause()
+            assert session.queued_follow_up_messages == ("after this\nrun tests",)
+            assert app.state.queued_follow_up == session.queued_follow_up_messages
+
+            queue = app.query_one("#queued-messages", Static)
+            assert queue.display is True
+            rows = [
+                str(row)
+                for row in tui_app._render_queued_messages(
+                    app.state,
+                    theme=app.tui_settings.resolved_theme,
+                ).renderables
+            ]
+            assert "↪ steering · queued: adjust course" in rows
+            assert "↳ follow-up · queued: after this" in rows
+            assert all("with detail" not in row and "run tests" not in row for row in rows)
+
+            await pilot.press("escape")
+            await wait_until(lambda: not session.is_running)
+
+    asyncio.run(scenario())
+
+
+def test_up_arrow_edits_latest_queued_follow_up(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = CancellableSession(tmp_path)
+        session.queued_follow_up_messages = ("first", "latest\nwith detail")
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = ""
+            app._render_state()
+            await pilot.press("up")
+            await pilot.pause()
+
+            assert prompt.value == "latest\nwith detail"
+            assert session.queued_follow_up_messages == ("first",)
+            assert app.state.queued_follow_up == ("first",)
+
+    asyncio.run(scenario())
+
+
+def test_tui_runs_terminal_commands_with_context_modes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = CancellableSession(tmp_path)
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "! pwd"
+            await pilot.press("enter")
+            await wait_until(lambda: len(session.terminal_commands) == 1 and not prompt.disabled)
+            assert session.terminal_commands == [("pwd", True)]
+            assert app.state.items[-1].text == "$ pwd"
+            assert app.state.items[-1].tool_result_text == (
+                "✓ bash · added to context\ncommand output"
+            )
+            assert app.state.items[-1].always_show_tool_result is True
+
+            prompt.value = "!! pwd"
+            await pilot.press("enter")
+            await wait_until(lambda: len(session.terminal_commands) == 2 and not prompt.disabled)
+            assert session.terminal_commands[-1] == ("pwd", False)
+            assert app.state.items[-1].tool_result_text == (
+                "✓ bash · not added to context\ncommand output"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_tui_marks_terminal_exception_as_failed(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = CancellableSession(tmp_path)
+
+        async def fail(
+            command: str,
+            *,
+            add_to_context: bool,
+        ) -> TerminalCommandResult:
+            del command, add_to_context
+            raise RuntimeError("boom")
+
+        session.run_terminal_command = fail  # type: ignore[method-assign]
+        app = AxisTuiApp(session)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "!! false"
+            await pilot.press("enter")
+            await wait_until(lambda: not prompt.disabled)
+
+            assert app.state.items[-1].text == "$ false"
+            assert app.state.items[-1].tool_result_text == ("✗ bash · not added to context\nboom")
+
+    asyncio.run(scenario())
+
+
+def test_tui_activity_indicator_tracks_running_state(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(CancellableSession(tmp_path))
+        async with app.run_test() as pilot:
+            prefix = app.query_one("#prompt-prefix", Static)
+            assert prefix.render().plain == "A"
+
+            app.state.running = True
+            app._render_state()
+            assert "■" in prefix.render().plain
+            initial = prefix.render().plain
+            app._tick_activity()
+            assert prefix.render().plain != initial
+
+            app.state.running = False
+            app._render_state()
+            assert prefix.render().plain == "A"
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+
+def test_ctrl_k_opens_registry_backed_command_completion(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(CancellableSession(tmp_path))
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            await pilot.press("ctrl+k")
+            await pilot.pause()
+
+            assert prompt.value == "/"
+            assert [item.display for item in app.completion_state.items] == [
+                "/compact",
+                "/export",
+                "/hotkeys",
+                "/login",
+                "/logout",
+                "/model",
+                "/name",
+                "/new",
+                "/quit",
+                "/reload",
+                "/resume",
+                "/scoped-models",
+                "/session",
+                "/skill:",
+                "/theme",
+                "/thinking",
+                "/tree",
+            ]
+
+            prompt.value = "/sta"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.pause()
+            assert [item.display for item in app.completion_state.items] == ["/session"]
+
+    asyncio.run(scenario())
+
+
+def test_quit_command_exits_the_app(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(CancellableSession(tmp_path))
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/quit"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await wait_until(lambda: not app.is_running)
+
+    asyncio.run(scenario())
+
+
+def test_exact_command_submits_and_uses_output_modal(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="fake",
+                storage=JsonlSessionStorage(tmp_path / "commands-session.jsonl"),
+                cwd=tmp_path,
+                tools=[],
+            )
+        )
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/session"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, CommandOutputScreen)
+            assert "Model: deepseek:fake" in app.screen.message
+            assert f"CWD: {tmp_path.resolve()}" in app.screen.message
+            assert app.state.items == []
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert not isinstance(app.screen, CommandOutputScreen)
+
+            prompt.value = "/help"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, CommandOutputScreen)
+            assert app.screen.message == "Unknown command: /help"
+
+    asyncio.run(scenario())
+
+
+def test_reload_updates_resources_and_appends_inline_status(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        axis_home = tmp_path / "axis-home"
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="fake",
+                storage=JsonlSessionStorage(tmp_path / "reload-ui-session.jsonl"),
+                cwd=tmp_path,
+                tools=[],
+                resource_paths=AxisResourcePaths(
+                    paths=AxisPaths(
+                        home=axis_home,
+                        agents_home=tmp_path / "agents-home",
+                    )
+                ),
+            )
+        )
+        skills_dir = axis_home / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "review.md").write_text(
+            "---\ndescription: Review changes\n---\nReview carefully.",
+            encoding="utf-8",
+        )
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/reload"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert not isinstance(app.screen, CommandOutputScreen)
+            assert [skill.name for skill in session.skills] == ["review"]
+            assert [skill.name for skill in app.state.skills] == ["review"]
+            assert app.state.items[-1].role == "status"
+            assert app.state.items[-1].text.startswith(
+                "/reload\nReloaded local coding resources and project context."
+            )
+
+    asyncio.run(scenario())
+
+
+def test_theme_command_argument_persists_and_picker_selects(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    async def scenario() -> None:
+        app = AxisTuiApp(CancellableSession(tmp_path))
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/theme axis-light"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.pause()
+            assert [item.display for item in app.completion_state.items] == ["axis-light"]
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert app.tui_settings.theme == "axis-light"
+            assert app.get_theme_variable_defaults()["axis-screen-background"] == "#ffffff"
+            assert (tmp_path / ".axis" / "tui.json").exists()
+
+            prompt.value = "/theme"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, ThemePickerScreen)
+            picker = app.screen.query_one("#theme-picker-list", ListView)
+            assert picker.index == 1
+
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            assert app.tui_settings.theme == "high-contrast"
+
+    asyncio.run(scenario())
+
+
+def test_ctrl_c_clears_unselected_prompt_text(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(CancellableSession(tmp_path))
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "discard me"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert prompt.value == ""
+
+    asyncio.run(scenario())
+
+
+def test_tui_resume_name_export_and_new_session_lifecycle(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        paths = AxisPaths(home=tmp_path / ".axis", agents_home=tmp_path / ".agents")
+        manager = SessionManager(paths)
+        first = manager.create_session(cwd=tmp_path, model="fake", session_id="first")
+        second = manager.create_session(cwd=tmp_path, model="fake", session_id="second")
+        first_storage = JsonlSessionStorage(first.path)
+        second_storage = JsonlSessionStorage(second.path)
+        await first_storage.append(
+            MessageEntry(id="first-root", message=UserMessage(content="First"))
+        )
+        await first_storage.append(LeafEntry(entry_id="first-root"))
+        await second_storage.append(
+            MessageEntry(id="second-root", message=UserMessage(content="Second"))
+        )
+        await second_storage.append(LeafEntry(entry_id="second-root"))
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="fake",
+                storage=first_storage,
+                cwd=tmp_path,
+                tools=[],
+                resource_paths=AxisResourcePaths(paths=paths),
+                session_id="first",
+                session_manager=manager,
+            )
+        )
+        app = AxisTuiApp(session)
+        notifications: list[str] = []
+        app._notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
+
+        async with app.run_test(size=(110, 32)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/resume sec"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.pause()
+            assert [item.display for item in app.completion_state.items] == ["second"]
+            prompt.value = "/resume second"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await wait_until(lambda: session.session_id == "second")
+            assert [(item.role, item.text) for item in app.state.items] == [("user", "Second")]
+
+            prompt.value = "/name Resumed work"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert manager.get_session("second").title == "Resumed work"  # type: ignore[union-attr]
+
+            prompt.value = "/export --format jsonl exported.jsonl"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert (tmp_path / "exported.jsonl").exists()
+
+            prompt.value = "/new"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await wait_until(lambda: session.session_id not in {"first", "second"})
+            assert app.state.items == []
+
+        assert any(message.startswith("Resumed session") for message in notifications)
+        assert "Session renamed: Resumed work" in notifications
+        assert any(message.startswith("Exported session") for message in notifications)
+
+    asyncio.run(scenario())
+
+
+def test_ctrl_r_session_picker_resumes_selected_record(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        paths = AxisPaths(home=tmp_path / ".axis", agents_home=tmp_path / ".agents")
+        manager = SessionManager(paths)
+        first = manager.create_session(cwd=tmp_path, model="fake", session_id="first")
+        second = manager.create_session(cwd=tmp_path, model="fake", session_id="second")
+        for record, content in ((first, "First"), (second, "Second")):
+            storage = JsonlSessionStorage(record.path)
+            await storage.append(
+                MessageEntry(id=f"{record.id}-root", message=UserMessage(content=content))
+            )
+            await storage.append(LeafEntry(entry_id=f"{record.id}-root"))
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="fake",
+                storage=JsonlSessionStorage(first.path),
+                cwd=tmp_path,
+                tools=[],
+                resource_paths=AxisResourcePaths(paths=paths),
+                session_id="first",
+                session_manager=manager,
+            )
+        )
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(110, 32)) as pilot:
+            await pilot.press("ctrl+r")
+            await pilot.pause()
+            assert isinstance(app.screen, SessionPickerScreen)
+            selected_id = app.screen.records[0].id
+            await pilot.press("enter")
+            await wait_until(lambda: session.session_id == selected_id)
+
+    asyncio.run(scenario())
+
+
+def test_model_picker_and_keyboard_cycles_change_runtime_state(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = CancellableSession(tmp_path)
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(110, 32)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/model"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, ModelPickerScreen)
+            app.screen.query_one("#model-picker-search", Input).value = "fast"
+            await pilot.pause()
+            assert app.screen.visible_choices == (ModelChoice("deepseek", "fake-fast"),)
+            await pilot.press("enter")
+            await wait_until(lambda: session.model == "fake-fast")
+            assert session.model_changes[-1] == ModelChoice("deepseek", "fake-fast")
+
+            await pilot.press("shift+tab")
+            await wait_until(lambda: session.thinking_level == "xhigh")
+            await pilot.press("ctrl+p")
+            await wait_until(lambda: session.model == "fake")
+
+            prompt.value = "/scoped-models"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, ModelPickerScreen)
+            assert app.screen.picker_kind == "scoped"
+
+    asyncio.run(scenario())
+
+
+def test_login_picker_saves_and_logout_removes_private_key(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        paths = AxisPaths(home=tmp_path / ".axis", agents_home=tmp_path / ".agents")
+        session = CancellableSession(tmp_path)
+        session.resource_paths = AxisResourcePaths(paths=paths, cwd=tmp_path)
+        app = AxisTuiApp(session)
+        notifications: list[str] = []
+        app._notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
+
+        async with app.run_test(size=(110, 32)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/login"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, LoginProviderPickerScreen)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, LoginScreen)
+            app.screen.query_one("#login-api-key", Input).value = "super-secret"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            store = FileCredentialStore(paths.home / "credentials.json")
+            assert store.get("deepseek") == "super-secret"
+            assert all("super-secret" not in message for message in notifications)
+
+            prompt.value = "/logout deepseek"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert store.get("deepseek") is None
+            assert any(message.startswith("Removed stored API key") for message in notifications)
+
+    asyncio.run(scenario())
+
+
+def test_login_preserves_in_memory_custom_models_and_scope(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        paths = AxisPaths(home=tmp_path / ".axis", agents_home=tmp_path / ".agents")
+        default_settings = load_provider_settings(paths)
+        default_provider = default_settings.get_provider("deepseek")
+        custom_model = "deepseek-v4-custom"
+        provider = replace(
+            default_provider,
+            models=(*default_provider.models, custom_model),
+            thinking_models=(*default_provider.thinking_models, custom_model),
+        )
+        settings = ProviderSettings(
+            default_provider="deepseek",
+            providers=(provider,),
+            scoped_models=(ScopedModelConfig("deepseek", custom_model),),
+        )
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model=custom_model,
+                storage=JsonlSessionStorage(tmp_path / "login-preserve.jsonl"),
+                cwd=tmp_path,
+                tools=[],
+                resource_paths=AxisResourcePaths(paths=paths),
+                provider_name="deepseek",
+                provider_settings=settings,
+            )
+        )
+        app = AxisTuiApp(session)
+        entry = builtin_provider_entry("deepseek")
+        assert entry is not None
+
+        app._handle_login_result(entry, "stored-key")
+
+        restored = load_provider_settings(paths)
+        assert custom_model in restored.get_provider("deepseek").models
+        assert restored.scoped_models == (ScopedModelConfig("deepseek", custom_model),)
+        await session.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_tree_picker_prefills_user_branch_and_can_summarize(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "tree-ui.jsonl")
+        entries = (
+            MessageEntry(id="root", message=UserMessage(content="Root")),
+            MessageEntry(
+                id="answer",
+                parent_id="root",
+                message=AssistantMessage(content="Answer"),
+            ),
+            MessageEntry(
+                id="followup",
+                parent_id="answer",
+                message=UserMessage(content="Try again"),
+            ),
+            LeafEntry(entry_id="followup"),
+        )
+        for entry in entries:
+            await storage.append(entry)
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                tools=[],
+            )
+        )
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(110, 32)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/tree"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, TreePickerScreen)
+            await pilot.press("enter")
+            await wait_until(lambda: prompt.value == "Try again")
+            assert session.messages == (
+                UserMessage(content="Root"),
+                AssistantMessage(content="Answer"),
+            )
+
+    asyncio.run(scenario())
+
+
+def test_tui_compaction_reloads_semantic_summary(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "compact-ui.jsonl")
+        root = MessageEntry(id="root", message=UserMessage(content="Earlier request"))
+        answer = MessageEntry(
+            id="answer",
+            parent_id="root",
+            message=AssistantMessage(content="Earlier answer"),
+        )
+        for entry in (root, answer, LeafEntry(entry_id="answer")):
+            await storage.append(entry)
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider(
+                    [
+                        [
+                            ProviderResponseEndEvent(
+                                message=AssistantMessage(content="Generated summary")
+                            )
+                        ]
+                    ]
+                ),
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                tools=[],
+            )
+        )
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(110, 32)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/compact Keep decisions"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await wait_until(lambda: bool(session.state.compaction_entries))
+            await pilot.pause()
+
+            assert [(item.role, item.text) for item in app.state.items] == [
+                ("compaction_summary", "Compaction summary (Ctrl+O to expand)")
+            ]
+            assert app.state.items[0].tool_result_text == "Generated summary"
+
+    asyncio.run(scenario())
+
+
+def test_tree_picker_s_summarizes_abandoned_branch(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "tree-summary-ui.jsonl")
+        entries = (
+            MessageEntry(id="root", message=UserMessage(content="Root")),
+            MessageEntry(
+                id="answer",
+                parent_id="root",
+                message=AssistantMessage(content="Answer"),
+            ),
+            MessageEntry(
+                id="followup",
+                parent_id="answer",
+                message=UserMessage(content="Abandoned work"),
+            ),
+            LeafEntry(entry_id="followup"),
+        )
+        for entry in entries:
+            await storage.append(entry)
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider(
+                    [[ProviderResponseEndEvent(message=AssistantMessage(content="Branch summary"))]]
+                ),
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                tools=[],
+            )
+        )
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(110, 32)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/tree"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, TreePickerScreen)
+            await pilot.press("up", "s")
+            await wait_until(
+                lambda: bool(app.state.items) and app.state.items[0].role == "branch_summary"
+            )
+
+            assert app.state.items[0].tool_result_text == "Branch summary"
+            assert prompt.disabled is False
+
+    asyncio.run(scenario())
+
+
+def test_tree_picker_c_uses_custom_summary_instructions(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "tree-custom-summary-ui.jsonl")
+        for entry in (
+            MessageEntry(id="root", message=UserMessage(content="Root")),
+            MessageEntry(
+                id="answer",
+                parent_id="root",
+                message=AssistantMessage(content="Answer"),
+            ),
+            MessageEntry(
+                id="followup",
+                parent_id="answer",
+                message=UserMessage(content="Abandoned work"),
+            ),
+            LeafEntry(entry_id="followup"),
+        ):
+            await storage.append(entry)
+        provider = FakeProvider(
+            [[ProviderResponseEndEvent(message=AssistantMessage(content="Focused summary"))]]
+        )
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                tools=[],
+            )
+        )
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(110, 32)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/tree"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("up", "c")
+            await pilot.pause()
+            assert isinstance(app.screen, BranchSummaryInstructionsScreen)
+            app.screen.query_one(
+                "#branch-summary-instructions-input", TextArea
+            ).text = "Focus on failing commands."
+            await pilot.press("ctrl+enter")
+            await wait_until(
+                lambda: bool(app.state.items) and app.state.items[0].role == "branch_summary"
+            )
+
+            assert app.state.items[0].tool_result_text == "Focused summary"
+            assert "Additional instructions:\nFocus on failing commands." in (
+                provider.calls[0][2][0].content
+            )
+
+    asyncio.run(scenario())
+
+
+def test_escape_cancels_active_compaction_and_restores_transcript(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+
+        class SlowCompactSession(CancellableSession):
+            async def compact(self, instructions: str | None = None) -> str:
+                del instructions
+                started.set()
+                await asyncio.Event().wait()
+                return "unreachable"
+
+        session = SlowCompactSession(
+            tmp_path,
+            messages=(UserMessage(content="Earlier"),),
+        )
+        app = AxisTuiApp(session)
+        notifications: list[str] = []
+        app._notify = lambda message, **_kwargs: notifications.append(message)  # type: ignore[method-assign]
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/compact"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await asyncio.wait_for(started.wait(), timeout=1)
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert app._compaction_worker is None
+            assert [(item.role, item.text) for item in app.state.items] == [("user", "Earlier")]
+            assert notifications == ["Cancelled compaction."]
+
+    asyncio.run(scenario())
+
+
+def test_tree_picker_toggles_tool_call_entries(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "tree-tools-ui.jsonl")
+        call = ToolCall(id="call-1", name="read", arguments={"path": "README.md"})
+        entries = (
+            MessageEntry(id="root", message=UserMessage(content="Read")),
+            MessageEntry(
+                id="tool-call",
+                parent_id="root",
+                message=AssistantMessage(tool_calls=[call]),
+            ),
+            MessageEntry(
+                id="tool-result",
+                parent_id="tool-call",
+                message=ToolResultMessage(
+                    tool_call_id="call-1",
+                    name="read",
+                    content="contents",
+                ),
+            ),
+            MessageEntry(
+                id="final",
+                parent_id="tool-result",
+                message=AssistantMessage(content="Done"),
+            ),
+            LeafEntry(entry_id="final"),
+        )
+        for entry in entries:
+            await storage.append(entry)
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                tools=[],
+            )
+        )
+        app = AxisTuiApp(session)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "/tree"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, TreePickerScreen)
+            tree = app.screen.query_one("#tree-picker-list", ListView)
+            assert len(tree.children) == 3
+
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            assert len(tree.children) == 2
+            assert "tool calls hidden" in str(
+                app.screen.query_one("#tree-picker-help", Static).render()
+            )
 
     asyncio.run(scenario())

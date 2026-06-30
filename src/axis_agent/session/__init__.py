@@ -2,11 +2,14 @@
 
 from axis_agent.session.entries import (
     BaseSessionEntry,
+    BranchSummaryEntry,
+    CompactionEntry,
     LeafEntry,
     MessageEntry,
     ModelChangeEntry,
     SessionEntry,
     SessionInfoEntry,
+    ThinkingLevelChangeEntry,
 )
 from axis_agent.session.jsonl import (
     SessionJsonlError,
@@ -26,12 +29,15 @@ from axis_agent.session.tree import (
 
 __all__ = [
     "BaseSessionEntry",
+    "BranchSummaryEntry",
+    "CompactionEntry",
     "JsonlSessionStorage",
     "LeafEntry",
     "MessageEntry",
     "ModelChangeEntry",
     "SessionEntry",
     "SessionInfoEntry",
+    "ThinkingLevelChangeEntry",
     "SessionJsonlError",
     "SessionState",
     "SessionStorage",

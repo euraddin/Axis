@@ -7,6 +7,8 @@ from pydantic import ValidationError
 
 from axis_agent import (
     AssistantMessage,
+    BranchSummaryEntry,
+    CompactionEntry,
     LeafEntry,
     MessageEntry,
     ModelChangeEntry,
@@ -137,6 +139,27 @@ def test_json_line_preserves_discriminator_and_unicode() -> None:
 
     assert payload["type"] == "message"
     assert payload["message"] == {"role": "user", "content": "你好，Axis"}
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        CompactionEntry(
+            id="compact",
+            summary="Earlier work summary.",
+            replaces_entry_ids=["one", "two"],
+        ),
+        BranchSummaryEntry(
+            id="branch-summary",
+            summary="Abandoned branch summary.",
+            branch_root_id="root",
+        ),
+    ],
+)
+def test_context_summary_entries_round_trip(entry: object) -> None:
+    line = entry_to_json_line(entry)  # type: ignore[arg-type]
+
+    assert entry_from_json_line(line) == entry
 
 
 def test_legacy_session_info_without_system_remains_readable() -> None:

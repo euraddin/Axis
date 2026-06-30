@@ -19,7 +19,6 @@ from axis_agent import (
 )
 from axis_ai import (
     FakeProvider,
-    OpenAICompatibleConfig,
     ProviderErrorEvent,
     ProviderResponseEndEvent,
     ProviderResponseStartEvent,
@@ -194,7 +193,14 @@ def test_cli_composes_prompt_cwd_and_model(
     ]
 
 
-def test_cli_reports_missing_key_without_traceback(tmp_path: Path) -> None:
+def test_cli_reports_missing_key_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def missing_provider(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("Missing credentials for provider deepseek")
+
+    monkeypatch.setattr("axis_coding.cli.create_model_provider", missing_provider)
     result = runner.invoke(
         app,
         ["-p", "Hello", "--cwd", str(tmp_path)],
@@ -202,7 +208,7 @@ def test_cli_reports_missing_key_without_traceback(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 1
-    assert "Missing required environment variable: DEEPSEEK_API_KEY" in result.stderr
+    assert "Missing credentials for provider deepseek" in result.stderr
     assert "Traceback" not in result.stderr
 
 
@@ -290,12 +296,12 @@ def test_deepseek_print_wrapper_closes_provider(
 
     provider = ClosingFakeProvider()
     monkeypatch.setattr(
-        "axis_coding.cli.deepseek_v4_config_from_env",
-        lambda: OpenAICompatibleConfig(api_key="test-key"),
+        "axis_coding.cli.create_model_provider",
+        lambda *_args, **_kwargs: provider,
     )
     monkeypatch.setattr(
-        "axis_coding.cli.OpenAICompatibleProvider",
-        lambda _config: provider,
+        "axis_coding.session.create_model_provider",
+        lambda *_args, **_kwargs: provider,
     )
 
     succeeded = asyncio.run(
@@ -313,7 +319,12 @@ def test_deepseek_print_wrapper_closes_provider(
     assert succeeded is True
     assert provider.closed is True
     assert capsys.readouterr().out == "Done\n"
-    assert len(list((tmp_path / "axis-home" / "sessions").rglob("*.jsonl"))) == 1
+    session_files = [
+        path
+        for path in (tmp_path / "axis-home" / "sessions").rglob("*.jsonl")
+        if path.name != "index.jsonl"
+    ]
+    assert len(session_files) == 1
 
 
 def test_deepseek_tui_wrapper_owns_provider_and_persistent_session(
@@ -333,18 +344,23 @@ def test_deepseek_tui_wrapper_owns_provider_and_persistent_session(
     provider = ClosingFakeProvider()
     observed_models: list[str] = []
 
-    async def fake_run_tui_app(session: CodingSession) -> None:
+    async def fake_run_tui_app(
+        session: CodingSession,
+        *,
+        startup_message: str | None = None,
+    ) -> None:
+        del startup_message
         observed_models.append(session.model)
         async for _event in session.prompt("TUI prompt"):
             pass
 
     monkeypatch.setattr(
-        "axis_coding.cli.deepseek_v4_config_from_env",
-        lambda: OpenAICompatibleConfig(api_key="test-key"),
+        "axis_coding.cli.create_model_provider",
+        lambda *_args, **_kwargs: provider,
     )
     monkeypatch.setattr(
-        "axis_coding.cli.OpenAICompatibleProvider",
-        lambda _config: provider,
+        "axis_coding.session.create_model_provider",
+        lambda *_args, **_kwargs: provider,
     )
     monkeypatch.setattr("axis_coding.cli.run_tui_app", fake_run_tui_app)
     paths = AxisPaths(
@@ -360,7 +376,9 @@ def test_deepseek_tui_wrapper_owns_provider_and_persistent_session(
         )
     )
 
-    session_files = list(paths.sessions_dir.rglob("*.jsonl"))
+    session_files = [
+        path for path in paths.sessions_dir.rglob("*.jsonl") if path.name != "index.jsonl"
+    ]
     assert observed_models == ["fake-model"]
     assert provider.closed is True
     assert len(session_files) == 1
@@ -369,6 +387,42 @@ def test_deepseek_tui_wrapper_owns_provider_and_persistent_session(
         UserMessage(content="TUI prompt"),
         AssistantMessage(content="TUI done"),
     )
+
+
+def test_deepseek_tui_opens_login_capable_ui_without_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: list[tuple[str, str | None]] = []
+
+    def missing_provider(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("missing key")
+
+    async def fake_run_tui_app(
+        session: CodingSession,
+        *,
+        startup_message: str | None = None,
+    ) -> None:
+        observed.append((session.provider_name, startup_message))
+
+    monkeypatch.setattr("axis_coding.cli.create_model_provider", missing_provider)
+    monkeypatch.setattr("axis_coding.cli.run_tui_app", fake_run_tui_app)
+    paths = AxisPaths(home=tmp_path / ".axis", agents_home=tmp_path / ".agents")
+
+    asyncio.run(
+        run_deepseek_tui_mode(
+            model="deepseek-v4-pro",
+            cwd=tmp_path,
+            paths=paths,
+        )
+    )
+
+    assert observed == [
+        (
+            "deepseek",
+            "Login required. Run /login or /login deepseek to save a DeepSeek API key.",
+        )
+    ]
 
 
 def test_run_print_mode_can_emit_json_events(tmp_path: Path) -> None:

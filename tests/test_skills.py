@@ -13,6 +13,7 @@ from axis_coding import (
     format_skill_invocation,
     load_skills,
     load_skills_with_diagnostics,
+    parse_skill_invocation,
 )
 
 
@@ -135,6 +136,21 @@ def test_skill_command_accepts_non_space_whitespace(tmp_path: Path) -> None:
 
     assert expanded is not None
     assert expanded.endswith("</skill>\n\nrun only parser tests")
+
+
+def test_expanded_skill_invocation_can_be_recovered_for_transcript_display(
+    tmp_path: Path,
+) -> None:
+    skill = Skill(name="review", path=tmp_path / "review.md", content="# Review\nInspect code.")
+    expanded = format_skill_invocation(skill, "check auth")
+
+    invocation = parse_skill_invocation(expanded)
+
+    assert invocation is not None
+    assert invocation.name == "review"
+    assert invocation.location == str(skill.path)
+    assert invocation.additional_instructions == "check auth"
+    assert parse_skill_invocation("ordinary prompt") is None
 
 
 def test_skill_command_distinguishes_normal_missing_and_unknown_prompts() -> None:

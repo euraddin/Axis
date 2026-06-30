@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from axis_agent import (
     AgentTool,
     AgentToolResult,
     AssistantMessage,
+    BranchSummaryEntry,
+    CompactionEntry,
     JsonlSessionStorage,
     LeafEntry,
     MessageEntry,
@@ -29,7 +32,15 @@ from axis_coding import (
     CodingSession,
     CodingSessionConfig,
     CodingSessionError,
+    FileCredentialStore,
+    ModelChoice,
+    ProviderSettings,
+    ReloadCategorySummary,
     ResourceError,
+    SessionManager,
+    SessionTreeBranchResult,
+    load_provider_settings,
+    parse_terminal_command,
 )
 
 
@@ -612,3 +623,510 @@ def test_unknown_skill_does_not_start_or_persist_a_session(tmp_path: Path) -> No
     assert session.messages == ()
     assert session.is_running is False
     assert path.exists() is False
+
+
+def test_parse_terminal_command_distinguishes_context_modes() -> None:
+    add = parse_terminal_command("  !  pwd  ")
+    local_only = parse_terminal_command("!! git status")
+
+    assert add is not None
+    assert add.command == "pwd"
+    assert add.add_to_context is True
+    assert local_only is not None
+    assert local_only.command == "git status"
+    assert local_only.add_to_context is False
+    assert parse_terminal_command("!") is None
+    assert parse_terminal_command("normal prompt") is None
+
+
+def test_coding_session_exposes_harness_queues_during_an_active_run(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingProvider:
+            def stream_response(self, **kwargs: object):  # type: ignore[no-untyped-def]
+                del kwargs
+
+                async def events():  # type: ignore[no-untyped-def]
+                    started.set()
+                    await release.wait()
+                    yield ProviderResponseEndEvent(
+                        message=AssistantMessage(content="Initial task complete")
+                    )
+
+                return events()
+
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=BlockingProvider(),
+                model="deepseek-v4-pro",
+                storage=JsonlSessionStorage(tmp_path / "queue-session.jsonl"),
+                cwd=tmp_path,
+                tools=[],
+            )
+        )
+        active = asyncio.create_task(collect_events(session.prompt("Initial task")))
+        await started.wait()
+
+        follow_events = await collect_events(
+            session.prompt("After this", streaming_behavior="follow_up")
+        )
+        steer_events = await collect_events(
+            session.prompt("Adjust now", streaming_behavior="steer")
+        )
+
+        assert [event.type for event in follow_events] == ["queue_update"]
+        assert [event.type for event in steer_events] == ["queue_update"]
+        assert session.queued_steering_messages == ("Adjust now",)
+        assert session.queued_follow_up_messages == ("After this",)
+        assert session.queue_update_event().follow_up == ("After this",)
+        assert session.pop_latest_follow_up_message() == "After this"
+        assert session.queued_follow_up_messages == ()
+
+        release.set()
+        await active
+
+    asyncio.run(scenario())
+
+
+def test_terminal_command_can_persist_frozen_user_context(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "terminal-session.jsonl")
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="deepseek-v4-pro",
+                storage=storage,
+                cwd=tmp_path,
+            )
+        )
+
+        result = await session.run_terminal_command(
+            "printf 'axis-output'",
+            add_to_context=True,
+        )
+
+        assert result.ok is True
+        assert result.output == "axis-output"
+        assert result.added_to_context is True
+        assert session.messages == (
+            UserMessage(
+                content=(
+                    "Terminal command executed by the user.\n\n"
+                    "Command:\n```bash\nprintf 'axis-output'\n```\n\n"
+                    "Output:\n```text\naxis-output\n```"
+                )
+            ),
+        )
+        persisted = [
+            entry.message for entry in await storage.read_all() if isinstance(entry, MessageEntry)
+        ]
+        assert persisted == list(session.messages)
+
+    asyncio.run(scenario())
+
+
+def test_terminal_command_cancellation_terminates_process_group(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="deepseek-v4-pro",
+                storage=JsonlSessionStorage(tmp_path / "cancel-session.jsonl"),
+                cwd=tmp_path,
+            )
+        )
+        task = asyncio.create_task(session.run_terminal_command("sleep 10", add_to_context=False))
+        for _ in range(100):
+            if session.is_running:
+                break
+            await asyncio.sleep(0.01)
+        assert session.is_running is True
+
+        session.cancel()
+        result = await asyncio.wait_for(task, timeout=2)
+
+        assert result.ok is False
+        assert "Command cancelled" in result.output
+        assert session.is_running is False
+
+    asyncio.run(scenario())
+
+
+def test_reload_refreshes_resources_and_persists_rebuilt_system_snapshot(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        axis_home = tmp_path / "axis-home"
+        paths = AxisResourcePaths(
+            paths=AxisPaths(
+                home=axis_home,
+                agents_home=tmp_path / "agents-home",
+            )
+        )
+        storage = JsonlSessionStorage(tmp_path / "reload-session.jsonl")
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="deepseek-v4-pro",
+                storage=storage,
+                cwd=tmp_path,
+                resource_paths=paths,
+            )
+        )
+        original_system = session.system
+
+        skills_dir = axis_home / "skills"
+        prompts_dir = axis_home / "prompts"
+        skills_dir.mkdir(parents=True)
+        prompts_dir.mkdir(parents=True)
+        (skills_dir / "review.md").write_text(
+            "---\ndescription: Review changes\n---\nReview carefully.",
+            encoding="utf-8",
+        )
+        (prompts_dir / "explain.md").write_text("Explain {{args}}.", encoding="utf-8")
+        (tmp_path / "AGENTS.md").write_text("Use deterministic tests.", encoding="utf-8")
+
+        summary = await session.reload()
+
+        assert summary.skills == ReloadCategorySummary(0, 1, True)
+        assert summary.prompt_templates == ReloadCategorySummary(0, 1, True)
+        assert summary.context_files == ReloadCategorySummary(0, 1, True)
+        assert summary.system_prompt_rebuilt is True
+        assert [skill.name for skill in session.skills] == ["review"]
+        assert [template.name for template in session.prompt_templates] == ["explain"]
+        assert "Review changes" in session.system
+        assert "Use deterministic tests." in session.system
+        assert session.system != original_system
+
+        entries = await storage.read_all()
+        assert [entry.type for entry in entries] == [
+            "session_info",
+            "model_change",
+            "session_info",
+            "leaf",
+        ]
+        restarted = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="different-default",
+                storage=storage,
+                cwd=tmp_path,
+                resource_paths=paths,
+            )
+        )
+        assert restarted.system == session.system
+        assert restarted.model == "deepseek-v4-pro"
+
+    asyncio.run(scenario())
+
+
+def test_reload_never_rewrites_caller_owned_system_prompt(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="deepseek-v4-pro",
+                storage=JsonlSessionStorage(tmp_path / "custom-system-session.jsonl"),
+                cwd=tmp_path,
+                system="",
+                resource_paths=AxisResourcePaths(
+                    paths=AxisPaths(
+                        home=tmp_path / "axis-home",
+                        agents_home=tmp_path / "agents-home",
+                    )
+                ),
+            )
+        )
+        (tmp_path / "AGENTS.md").write_text("New project rules.", encoding="utf-8")
+
+        summary = await session.reload()
+
+        assert summary.context_files.changed is True
+        assert summary.system_prompt_rebuilt is False
+        assert session.system == ""
+
+    asyncio.run(scenario())
+
+
+def test_indexed_sessions_can_rename_resume_and_start_new(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        paths = AxisPaths(home=tmp_path / ".axis", agents_home=tmp_path / ".agents")
+        manager = SessionManager(paths)
+        first_record = manager.create_session(cwd=tmp_path, model="fake", session_id="first")
+        first = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider(
+                    [[ProviderResponseEndEvent(message=AssistantMessage(content="First answer"))]]
+                ),
+                model="fake",
+                storage=JsonlSessionStorage(first_record.path),
+                cwd=tmp_path,
+                session_id=first_record.id,
+                session_manager=manager,
+                resource_paths=AxisResourcePaths(paths=paths),
+                tools=[],
+            )
+        )
+        await collect_events(first.prompt("First prompt"))
+        assert await first.rename("Primary work") == "Session renamed: Primary work"
+        assert manager.get_session("first").title == "Primary work"  # type: ignore[union-attr]
+
+        second_record = manager.create_session(cwd=tmp_path, model="fake", session_id="second")
+        second = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider(
+                    [[ProviderResponseEndEvent(message=AssistantMessage(content="Second answer"))]]
+                ),
+                model="fake",
+                storage=JsonlSessionStorage(second_record.path),
+                cwd=tmp_path,
+                session_id=second_record.id,
+                session_manager=manager,
+                resource_paths=AxisResourcePaths(paths=paths),
+                tools=[],
+            )
+        )
+        await collect_events(second.prompt("Second prompt"))
+
+        assert await first.resume("second") == "Resumed session: second"
+        assert first.session_id == "second"
+        assert first.messages == second.messages
+
+        message = await first.new_session()
+        assert message.startswith("Started new session: ")
+        assert first.session_id not in {"first", "second"}
+        assert first.messages == ()
+
+    asyncio.run(scenario())
+
+
+def test_session_tree_branching_preserves_history_and_prefills_user_message(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "branch-session.jsonl")
+        root = MessageEntry(id="root", message=UserMessage(content="Root"))
+        answer = MessageEntry(
+            id="answer",
+            parent_id="root",
+            message=AssistantMessage(content="Answer"),
+        )
+        followup = MessageEntry(
+            id="followup",
+            parent_id="answer",
+            message=UserMessage(content="Try again"),
+        )
+        for entry in (root, answer, followup, LeafEntry(entry_id="followup")):
+            await storage.append(entry)
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                tools=[],
+            )
+        )
+
+        choices = await session.tree_choices()
+        result = await session.branch_to_entry("followup")
+
+        assert [choice.entry_id for choice in choices] == ["root", "answer", "followup"]
+        assert result == SessionTreeBranchResult(
+            message="Branched session before followup.",
+            input_prefill="Try again",
+        )
+        assert session.messages == (
+            UserMessage(content="Root"),
+            AssistantMessage(content="Answer"),
+        )
+        entries = await storage.read_all()
+        assert [entry.id for entry in entries if isinstance(entry, MessageEntry)] == [
+            "root",
+            "answer",
+            "followup",
+        ]
+        assert isinstance(entries[-1], LeafEntry)
+        assert entries[-1].entry_id == "answer"
+
+    asyncio.run(scenario())
+
+
+def test_branch_summary_and_compaction_rebuild_provider_context(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "summary-session.jsonl")
+        root = MessageEntry(id="root", message=UserMessage(content="Root"))
+        answer = MessageEntry(
+            id="answer",
+            parent_id="root",
+            message=AssistantMessage(content="Old direction"),
+        )
+        followup = MessageEntry(
+            id="followup",
+            parent_id="answer",
+            message=UserMessage(content="More old work"),
+        )
+        for entry in (root, answer, followup, LeafEntry(entry_id="followup")):
+            await storage.append(entry)
+        provider = FakeProvider(
+            [
+                [
+                    ProviderResponseEndEvent(
+                        message=AssistantMessage(content="The abandoned branch went left.")
+                    )
+                ],
+                [
+                    ProviderResponseEndEvent(
+                        message=AssistantMessage(content="Compact summary of the branch.")
+                    )
+                ],
+            ]
+        )
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                tools=[],
+            )
+        )
+
+        branch = await session.branch_to_entry("root", summarize=True)
+        assert "with branch summary" in branch.message
+        assert len(session.messages) == 1
+        assert "The abandoned branch went left." in session.messages[0].content
+
+        compacted = await session.compact("Keep implementation decisions.")
+        assert compacted == "Compacted 1 context entries."
+        assert session.messages == (
+            UserMessage(content="Previous conversation summary:\nCompact summary of the branch."),
+        )
+        entries = await storage.read_all()
+        assert any(isinstance(entry, BranchSummaryEntry) for entry in entries)
+        assert any(isinstance(entry, CompactionEntry) for entry in entries)
+        assert "Additional instructions" in provider.calls[1][2][0].content
+
+    asyncio.run(scenario())
+
+
+def test_session_persists_model_and_thinking_changes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        paths = AxisPaths(home=tmp_path / ".axis", agents_home=tmp_path / ".agents")
+        settings = load_provider_settings(paths)
+        original = settings.get_provider("deepseek")
+        alternate_model = "deepseek-v4-fast"
+        provider_config = replace(
+            original,
+            models=(*original.models, alternate_model),
+            thinking_models=(*original.thinking_models, alternate_model),
+        )
+        settings = ProviderSettings(
+            default_provider="deepseek",
+            providers=(provider_config,),
+        )
+        FileCredentialStore(paths.home / "credentials.json").set("deepseek", "test-key")
+        storage = JsonlSessionStorage(tmp_path / "model-thinking.jsonl")
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model=original.default_model,
+                storage=storage,
+                cwd=tmp_path,
+                tools=[],
+                resource_paths=AxisResourcePaths(paths=paths),
+                provider_name="deepseek",
+                provider_settings=settings,
+                thinking_level="xhigh",
+            )
+        )
+
+        assert await session.set_model(alternate_model) == (
+            f"Current model: deepseek:{alternate_model}"
+        )
+        assert await session.set_thinking_level("high") == "Thinking mode: high"
+        assert session.model == alternate_model
+        assert session.thinking_level == "high"
+        entries = await storage.read_all()
+        assert any(
+            isinstance(entry, ModelChangeEntry) and entry.model == alternate_model
+            for entry in entries
+        )
+        assert any(
+            entry.type == "thinking_level_change" and entry.thinking_level == "high"
+            for entry in entries
+        )
+
+        restored = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model=original.default_model,
+                storage=storage,
+                cwd=tmp_path,
+                tools=[],
+                resource_paths=AxisResourcePaths(paths=paths),
+                provider_name="deepseek",
+                provider_settings=settings,
+                thinking_level="xhigh",
+            )
+        )
+        assert restored.model == alternate_model
+        assert restored.thinking_level == "high"
+        await session.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_session_scoped_model_cycle_and_manager_track_provider(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        paths = AxisPaths(home=tmp_path / ".axis", agents_home=tmp_path / ".agents")
+        manager = SessionManager(paths)
+        settings = load_provider_settings(paths)
+        original = settings.get_provider("deepseek")
+        alternate_model = "deepseek-v4-fast"
+        provider_config = replace(
+            original,
+            models=(*original.models, alternate_model),
+            thinking_models=(*original.thinking_models, alternate_model),
+        )
+        settings = ProviderSettings(
+            default_provider="deepseek",
+            providers=(provider_config,),
+        )
+        FileCredentialStore(paths.home / "credentials.json").set("deepseek", "test-key")
+        record = manager.create_session(
+            cwd=tmp_path,
+            model=original.default_model,
+            provider_name="deepseek",
+            session_id="scoped",
+        )
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model=original.default_model,
+                storage=JsonlSessionStorage(record.path),
+                cwd=tmp_path,
+                tools=[],
+                resource_paths=AxisResourcePaths(paths=paths),
+                session_id=record.id,
+                session_manager=manager,
+                provider_name="deepseek",
+                provider_settings=settings,
+            )
+        )
+
+        session.toggle_scoped_model(ModelChoice("deepseek", original.default_model))
+        session.toggle_scoped_model(ModelChoice("deepseek", alternate_model))
+        selected = await session.cycle_scoped_model()
+
+        assert selected == ModelChoice("deepseek", alternate_model)
+        assert session.model == alternate_model
+        updated = manager.get_session(record.id)
+        assert updated is not None
+        assert updated.provider_name == "deepseek"
+        assert updated.model == alternate_model
+        await session.aclose()
+
+    asyncio.run(scenario())

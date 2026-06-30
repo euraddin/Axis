@@ -29,6 +29,16 @@ class Skill:
     description: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SkillInvocation:
+    """One expanded skill prompt recovered from the durable transcript."""
+
+    name: str
+    location: str
+    content: str
+    additional_instructions: str | None = None
+
+
 def load_skills(paths: AxisResourcePaths | None = None) -> tuple[Skill, ...]:
     """Load skills, raising when a resource directory contains invalid entries."""
     resource_paths = paths if paths is not None else AxisResourcePaths()
@@ -103,6 +113,24 @@ def format_skill_invocation(
     if additional_instructions and additional_instructions.strip():
         return f"{block}\n\n{additional_instructions.strip()}"
     return block
+
+
+def parse_skill_invocation(text: str) -> SkillInvocation | None:
+    """Parse the exact expanded skill shape produced by Axis."""
+    match = re.fullmatch(
+        r'<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n</skill>'
+        r"(?:\n\n([\s\S]+))?",
+        text,
+    )
+    if match is None:
+        return None
+    name, location, content, additional_instructions = match.groups()
+    return SkillInvocation(
+        name=name,
+        location=location,
+        content=content,
+        additional_instructions=additional_instructions,
+    )
 
 
 def _discover_skills_dir(

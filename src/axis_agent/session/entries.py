@@ -43,6 +43,29 @@ class ModelChangeEntry(BaseSessionEntry):
     model: str = Field(min_length=1)
 
 
+class ThinkingLevelChangeEntry(BaseSessionEntry):
+    """A reasoning-effort change for subsequent provider requests."""
+
+    type: Literal["thinking_level_change"] = "thinking_level_change"
+    thinking_level: str = Field(min_length=1)
+
+
+class CompactionEntry(BaseSessionEntry):
+    """A summary replacing selected earlier message entries during replay."""
+
+    type: Literal["compaction"] = "compaction"
+    summary: str = Field(min_length=1)
+    replaces_entry_ids: list[str] = Field(default_factory=list)
+
+
+class BranchSummaryEntry(BaseSessionEntry):
+    """A summary of history abandoned when branching from an old entry."""
+
+    type: Literal["branch_summary"] = "branch_summary"
+    summary: str = Field(min_length=1)
+    branch_root_id: str | None = None
+
+
 class LeafEntry(BaseSessionEntry):
     """An append-only pointer to the active session-tree leaf."""
 
@@ -61,6 +84,12 @@ class SessionInfoEntry(BaseSessionEntry):
 
 
 type SessionEntry = Annotated[
-    MessageEntry | ModelChangeEntry | LeafEntry | SessionInfoEntry,
+    MessageEntry
+    | ModelChangeEntry
+    | ThinkingLevelChangeEntry
+    | CompactionEntry
+    | BranchSummaryEntry
+    | LeafEntry
+    | SessionInfoEntry,
     Field(discriminator="type"),
 ]
