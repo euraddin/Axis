@@ -60,6 +60,7 @@ from axis_coding.tui.widgets import (
     render_chat_item,
     render_compact_session_info,
     render_completion_suggestions,
+    render_request_context_usage,
     render_session_sidebar,
     transcript_item_selection_text,
 )
@@ -112,6 +113,7 @@ __all__ = [
     "render_chat_item",
     "render_compact_session_info",
     "render_completion_suggestions",
+    "render_request_context_usage",
     "render_session_sidebar",
     "render_tui_state",
     "run_tui_app",

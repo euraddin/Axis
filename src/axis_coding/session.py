@@ -40,7 +40,8 @@ from axis_coding.context import (
 )
 from axis_coding.context_window import (
     DEFAULT_CONTEXT_WINDOW_TOKENS,
-    estimate_context_tokens,
+    ContextUsageEstimate,
+    estimate_context_usage,
 )
 from axis_coding.credentials import FileCredentialStore, credentials_path
 from axis_coding.prompt_templates import (
@@ -389,7 +390,16 @@ class CodingSession:
 
     @property
     def context_token_estimate(self) -> int:
-        return estimate_context_tokens(system=self.system, messages=self.messages)
+        return self.context_usage.total_tokens
+
+    @property
+    def context_usage(self) -> ContextUsageEstimate:
+        """Estimate the current system/messages/tools request snapshot."""
+        return estimate_context_usage(
+            system=self.system,
+            messages=self.messages,
+            tools=self.tools,
+        )
 
     @property
     def context_window_tokens(self) -> int:

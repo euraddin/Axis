@@ -43,6 +43,7 @@ from axis_coding import (
     AxisResourcePaths,
     CodingSession,
     CodingSessionConfig,
+    ContextUsageEstimate,
     FileCredentialStore,
     ModelChoice,
     ProjectContextFile,
@@ -72,6 +73,7 @@ from axis_coding.tui import (
     TranscriptView,
     TreePickerScreen,
     render_compact_session_info,
+    render_request_context_usage,
     render_session_sidebar,
 )
 from axis_coding.tui.config import TuiKeybindings, TuiSettings
@@ -286,6 +288,25 @@ def test_session_sidebar_and_compact_info_render_axis_session_facts(
     assert "12k/128k context" in output
     assert "12k/64k context" in output
     assert "/workspace/project (--)" in output
+
+
+def test_request_context_usage_renders_token_ratios() -> None:
+    rendered = render_request_context_usage(
+        ContextUsageEstimate(
+            total_tokens=1_000,
+            system_tokens=400,
+            message_tokens=350,
+            tool_tokens=250,
+            message_count=3,
+            tool_count=4,
+        ),
+        turn=2,
+    )
+
+    assert rendered.plain == (
+        "request 2 estimate · total ≈1,000 tokens · "
+        "system 40.0% (400) · messages 35.0% (350) · tools 25.0% (250)"
+    )
 
 
 def test_tui_sidebar_responds_to_terminal_width_and_height(tmp_path: Path) -> None:
@@ -668,6 +689,15 @@ def test_tui_tracks_complete_tool_round_trip(tmp_path: Path) -> None:
             assert tool_items[0].text == "→ read README.md"
             assert tool_items[0].tool_call_id == "call-1"
             assert tool_items[0].tool_result_text == "✓ read\ncontents of README.md"
+            assert app._request_context_turn == 2
+            assert app._request_context_usage is not None
+            assert app._request_context_usage.tool_count == 1
+            request_usage = app.query_one("#request-context-usage", Static)
+            request_text = str(request_usage.render())
+            assert "request 2 estimate" in request_text
+            assert "system " in request_text
+            assert "messages " in request_text
+            assert "tools " in request_text
 
     asyncio.run(scenario())
 

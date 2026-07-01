@@ -21,6 +21,7 @@ from textual.selection import Selection
 from textual.widgets import Markdown as TextualMarkdown
 from textual.widgets import Static
 
+from axis_coding.context_window import ContextUsageEstimate
 from axis_coding.tui.autocomplete import CompletionState
 from axis_coding.tui.config import AXIS_DARK_THEME, TuiRoleStyle, TuiTheme
 from axis_coding.tui.state import ChatItem, TuiState, visible_chat_text
@@ -166,6 +167,29 @@ def render_compact_session_info(
     table.add_column(ratio=1, justify="right")
     table.add_row(left, right)
     return table
+
+
+def render_request_context_usage(
+    usage: ContextUsageEstimate,
+    *,
+    turn: int,
+    theme: TuiTheme = AXIS_DARK_THEME,
+) -> Text:
+    """Render the estimated input composition of one Provider request."""
+    rendered = Text(style=theme.completion_description, overflow="fold", no_wrap=False)
+    rendered.append(f"request {turn} estimate · total ≈{usage.total_tokens:,} tokens · ")
+    parts = (
+        ("system", usage.system_tokens),
+        ("messages", usage.message_tokens),
+        ("tools", usage.tool_tokens),
+    )
+    for index, (label, tokens) in enumerate(parts):
+        if index:
+            rendered.append(" · ")
+        percentage = 0.0 if usage.total_tokens == 0 else tokens * 100 / usage.total_tokens
+        rendered.append(f"{label} {percentage:.1f}%", style=theme.prompt_text)
+        rendered.append(f" ({tokens:,})")
+    return rendered
 
 
 def _sidebar_section(title: str, body: RenderableType, *, theme: TuiTheme) -> RenderableType:

@@ -28,6 +28,7 @@ from axis_agent import (
     MessageEndEvent,
     MessageStartEvent,
     ThinkingDeltaEvent,
+    TurnStartEvent,
 )
 from axis_coding.commands import (
     CommandRegistry,
@@ -36,6 +37,7 @@ from axis_coding.commands import (
     create_default_command_registry,
     format_reload_summary,
 )
+from axis_coding.context_window import ContextUsageEstimate
 from axis_coding.credentials import FileCredentialStore, credentials_path
 from axis_coding.provider_catalog import (
     BUILTIN_PROVIDER_CATALOG,
@@ -81,6 +83,7 @@ from axis_coding.tui.widgets import (
     SessionSidebar,
     TranscriptView,
     render_completion_suggestions,
+    render_request_context_usage,
 )
 
 ACTIVITY_TICK_SECONDS = 0.15
@@ -348,6 +351,9 @@ class TuiSession(Protocol):
 
     @property
     def context_token_estimate(self) -> int: ...
+
+    @property
+    def context_usage(self) -> ContextUsageEstimate: ...
 
     @property
     def context_window_tokens(self) -> int: ...
@@ -1036,6 +1042,14 @@ class AxisTuiApp(App[None]):
         color: $axis-muted-text;
     }
 
+    #request-context-usage {
+        height: auto;
+        max-height: 4;
+        margin: 0 1 1 1;
+        padding: 0 1;
+        color: $axis-muted-text;
+    }
+
     CommandOutputScreen, ThemePickerScreen, SessionPickerScreen, TreePickerScreen,
     BranchSummaryInstructionsScreen, ModelPickerScreen, LoginProviderPickerScreen,
     LoginScreen {
@@ -1143,6 +1157,8 @@ class AxisTuiApp(App[None]):
         self._terminal_active = False
         self._compaction_worker: Worker[None] | None = None
         self._prompt_worker: Worker[None] | None = None
+        self._request_context_usage: ContextUsageEstimate | None = None
+        self._request_context_turn: int | None = None
 
     def get_theme_variable_defaults(self) -> dict[str, str]:
         """Add Axis theme variables used by the app stylesheet."""
@@ -1167,6 +1183,7 @@ class AxisTuiApp(App[None]):
                         tui_keybindings=self.tui_settings.keybindings,
                     )
                 yield CompactSessionInfo(id="compact-session-info")
+                yield Static(id="request-context-usage")
                 yield Static(id="autocomplete")
         yield Footer()
 
@@ -1467,6 +1484,8 @@ class AxisTuiApp(App[None]):
         self.state.running = False
 
     def _reload_visible_session(self) -> None:
+        self._request_context_usage = None
+        self._request_context_turn = None
         self.state.clear()
         self.state.set_skills(tuple(getattr(self.session, "skills", ())))
         self.state.load_messages(tuple(getattr(self.session, "messages", ())))
@@ -1492,6 +1511,8 @@ class AxisTuiApp(App[None]):
         try:
             async for event in self.session.prompt(content):
                 self.adapter.apply(event)
+                if isinstance(event, TurnStartEvent):
+                    self._capture_request_context_usage(event.turn)
                 await self._apply_streaming_transcript_event(event)
                 if self.state.cancelled:
                     self._cancel_requested = False
@@ -2054,8 +2075,30 @@ class AxisTuiApp(App[None]):
             self.session,
             theme=self.tui_settings.resolved_theme,
         )
+        request_usage = self.query_one("#request-context-usage", Static)
+        request_usage.display = (
+            self._request_context_usage is not None and self._request_context_turn is not None
+        )
+        if self._request_context_usage is not None and self._request_context_turn is not None:
+            request_usage.update(
+                render_request_context_usage(
+                    self._request_context_usage,
+                    turn=self._request_context_turn,
+                    theme=self.tui_settings.resolved_theme,
+                )
+            )
         self._sync_activity_indicator()
         self._refresh_footer_bindings()
+
+    def _capture_request_context_usage(self, turn: int) -> None:
+        try:
+            usage = getattr(self.session, "context_usage", None)
+        except Exception:  # UI telemetry must never interrupt an agent request
+            return
+        if not isinstance(usage, ContextUsageEstimate):
+            return
+        self._request_context_usage = usage
+        self._request_context_turn = turn
 
     def _rebuild_completions(self, prompt: PromptInput) -> None:
         prefix = prompt.text[: prompt.cursor_position]

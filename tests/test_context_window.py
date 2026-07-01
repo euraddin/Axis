@@ -9,11 +9,15 @@ from axis_ai import FakeProvider
 from axis_coding import (
     CodingSession,
     CodingSessionConfig,
+    ContextUsageEstimate,
     OpenAICompatibleProviderConfig,
     ProviderSettings,
+    create_coding_tools,
     estimate_context_tokens,
+    estimate_context_usage,
     estimate_message_tokens,
     estimate_text_tokens,
+    estimate_tool_tokens,
 )
 
 
@@ -44,6 +48,33 @@ def test_context_estimates_are_deterministic_and_include_protocol_data() -> None
 
 def test_unicode_estimate_uses_encoded_size_instead_of_character_count() -> None:
     assert estimate_text_tokens("你好世界") > estimate_text_tokens("abcd")
+
+
+def test_context_usage_reports_system_message_and_tool_proportions(tmp_path: Path) -> None:
+    messages = (UserMessage(content="inspect this project"),)
+    tools = tuple(create_coding_tools(cwd=tmp_path))
+
+    usage = estimate_context_usage(
+        system="You are Axis.",
+        messages=messages,
+        tools=tools,
+    )
+
+    assert isinstance(usage, ContextUsageEstimate)
+    assert usage.system_tokens == estimate_text_tokens("You are Axis.")
+    assert usage.message_tokens == estimate_message_tokens(messages[0])
+    assert usage.tool_tokens == sum(estimate_tool_tokens(tool) for tool in tools)
+    assert usage.total_tokens == (usage.system_tokens + usage.message_tokens + usage.tool_tokens)
+    assert usage.message_count == 1
+    assert usage.tool_count == 4
+    assert (
+        estimate_context_tokens(
+            system="You are Axis.",
+            messages=messages,
+            tools=tools,
+        )
+        == usage.total_tokens
+    )
 
 
 def test_coding_session_exposes_provider_window_and_display_threshold(
@@ -77,6 +108,8 @@ def test_coding_session_exposes_provider_window_and_display_threshold(
 
         assert session.context_window_tokens == 200_000
         assert session.auto_compact_token_threshold == 64_000
-        assert session.context_token_estimate > 0
+        assert session.context_usage.total_tokens == session.context_token_estimate
+        assert session.context_usage.system_tokens > 0
+        assert session.context_usage.tool_tokens == 0
 
     asyncio.run(scenario())

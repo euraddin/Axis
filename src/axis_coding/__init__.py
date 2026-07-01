@@ -15,9 +15,12 @@ from axis_coding.context import (
 )
 from axis_coding.context_window import (
     DEFAULT_CONTEXT_WINDOW_TOKENS,
+    ContextUsageEstimate,
     estimate_context_tokens,
+    estimate_context_usage,
     estimate_message_tokens,
     estimate_text_tokens,
+    estimate_tool_tokens,
 )
 from axis_coding.credentials import CredentialStoreError, FileCredentialStore, credentials_path
 from axis_coding.paths import AxisPaths
@@ -146,6 +149,7 @@ __all__ = [
     "CommandContext",
     "CommandRegistry",
     "CommandResult",
+    "ContextUsageEstimate",
     "OPERATING_PRINCIPLES",
     "DEFAULT_PROVIDER_NAME",
     "DEFAULT_CONTEXT_WINDOW_TOKENS",
@@ -195,8 +199,10 @@ __all__ = [
     "discover_project_context_with_diagnostics",
     "derive_markdown_description",
     "estimate_context_tokens",
+    "estimate_context_usage",
     "estimate_message_tokens",
     "estimate_text_tokens",
+    "estimate_tool_tokens",
     "credentials_path",
     "default_session_export_path",
     "expand_prompt_template_command",

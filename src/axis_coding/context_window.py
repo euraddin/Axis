@@ -1,10 +1,24 @@
 """Deterministic, provider-neutral context usage estimates for the TUI."""
 
+from dataclasses import dataclass
 from json import dumps
 
-from axis_agent import AgentMessage, AssistantMessage, ToolResultMessage
+from axis_agent import AgentMessage, AgentTool, AssistantMessage, ToolResultMessage
 
 DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
+TOOL_DEFINITION_OVERHEAD_TOKENS = 16
+
+
+@dataclass(frozen=True, slots=True)
+class ContextUsageEstimate:
+    """Estimated input-token composition of one Provider request."""
+
+    total_tokens: int
+    system_tokens: int
+    message_tokens: int
+    tool_tokens: int
+    message_count: int
+    tool_count: int
 
 
 def estimate_text_tokens(text: str) -> int:
@@ -30,12 +44,45 @@ def estimate_message_tokens(message: AgentMessage) -> int:
     return estimate
 
 
+def estimate_tool_tokens(tool: AgentTool) -> int:
+    """Estimate one serialized Provider tool definition."""
+    return (
+        TOOL_DEFINITION_OVERHEAD_TOKENS
+        + estimate_text_tokens(tool.name)
+        + estimate_text_tokens(tool.description)
+        + estimate_text_tokens(dumps(dict(tool.input_schema), sort_keys=True))
+    )
+
+
+def estimate_context_usage(
+    *,
+    system: str,
+    messages: tuple[AgentMessage, ...],
+    tools: tuple[AgentTool, ...] = (),
+) -> ContextUsageEstimate:
+    """Estimate the system/messages/tools composition of one request."""
+    system_tokens = estimate_text_tokens(system)
+    message_tokens = sum(estimate_message_tokens(message) for message in messages)
+    tool_tokens = sum(estimate_tool_tokens(tool) for tool in tools)
+    return ContextUsageEstimate(
+        total_tokens=system_tokens + message_tokens + tool_tokens,
+        system_tokens=system_tokens,
+        message_tokens=message_tokens,
+        tool_tokens=tool_tokens,
+        message_count=len(messages),
+        tool_count=len(tools),
+    )
+
+
 def estimate_context_tokens(
     *,
     system: str,
     messages: tuple[AgentMessage, ...],
+    tools: tuple[AgentTool, ...] = (),
 ) -> int:
     """Estimate the next request's system and transcript token footprint."""
-    return estimate_text_tokens(system) + sum(
-        estimate_message_tokens(message) for message in messages
-    )
+    return estimate_context_usage(
+        system=system,
+        messages=messages,
+        tools=tools,
+    ).total_tokens
