@@ -15,6 +15,8 @@ from axis_agent import (
     MessageEndEvent,
     MessageEntry,
     SessionState,
+    ToolCall,
+    ToolResultMessage,
     UserMessage,
 )
 from axis_ai import (
@@ -33,6 +35,7 @@ from axis_coding import (
     ResourceError,
     ScopedModelConfig,
     SessionManager,
+    ToolApprovalPolicy,
     __version__,
 )
 from axis_coding.cli import (
@@ -119,6 +122,79 @@ def test_run_print_mode_returns_failure_for_provider_error(tmp_path: Path) -> No
     assert succeeded is False
     assert stdout.getvalue() == ""
     assert stderr.getvalue() == "Error: provider failed\n"
+
+
+def test_print_mode_ask_policy_denies_protected_tool_without_tty(tmp_path: Path) -> None:
+    target = tmp_path / "blocked.txt"
+    call = ToolCall(
+        id="call-write",
+        name="write",
+        arguments={"path": str(target), "content": "blocked"},
+    )
+    provider = FakeProvider(
+        [
+            [ProviderResponseEndEvent(message=AssistantMessage(tool_calls=[call]))],
+            [ProviderResponseEndEvent(message=AssistantMessage(content="Denied safely"))],
+        ]
+    )
+    stdout = StringIO()
+    stderr = StringIO()
+
+    succeeded = asyncio.run(
+        run_print_mode(
+            prompt="Write a file",
+            model="fake-model",
+            cwd=tmp_path,
+            provider=provider,
+            output=PrintOutputMode.JSON,
+            stdin=StringIO("y\n"),
+            stdout=stdout,
+            stderr=stderr,
+        )
+    )
+
+    events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    result = next(
+        message for message in provider.calls[1][2] if isinstance(message, ToolResultMessage)
+    )
+    assert succeeded is True
+    assert target.exists() is False
+    assert result.tool_call_id == "call-write"
+    assert result.ok is False
+    assert result.error == "Tool call denied by user"
+    assert [event["type"] for event in events].count("tool_approval_request") == 1
+    assert [event["type"] for event in events].count("tool_approval_resolved") == 1
+    assert stderr.getvalue() == ""
+
+
+def test_print_mode_allow_policy_executes_protected_tool(tmp_path: Path) -> None:
+    target = tmp_path / "allowed.txt"
+    call = ToolCall(
+        id="call-write",
+        name="write",
+        arguments={"path": str(target), "content": "allowed"},
+    )
+    provider = FakeProvider(
+        [
+            [ProviderResponseEndEvent(message=AssistantMessage(tool_calls=[call]))],
+            [ProviderResponseEndEvent(message=AssistantMessage(content="Written"))],
+        ]
+    )
+
+    succeeded = asyncio.run(
+        run_print_mode(
+            prompt="Write a file",
+            model="fake-model",
+            cwd=tmp_path,
+            provider=provider,
+            tool_policy=ToolApprovalPolicy.ALLOW,
+            stdout=StringIO(),
+            stderr=StringIO(),
+        )
+    )
+
+    assert succeeded is True
+    assert target.read_text(encoding="utf-8") == "allowed"
 
 
 def test_cli_shows_version_without_provider_configuration() -> None:
@@ -395,7 +471,7 @@ def test_cli_composes_prompt_cwd_and_model(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    observed: list[tuple[str, str, Path, PrintOutputMode]] = []
+    observed: list[tuple[str, str, Path, PrintOutputMode, ToolApprovalPolicy]] = []
 
     async def fake_run_deepseek_print_mode(
         *,
@@ -403,8 +479,9 @@ def test_cli_composes_prompt_cwd_and_model(
         model: str,
         cwd: Path,
         output: PrintOutputMode,
+        tool_policy: ToolApprovalPolicy,
     ) -> bool:
-        observed.append((prompt, model, cwd, output))
+        observed.append((prompt, model, cwd, output, tool_policy))
         return True
 
     monkeypatch.setattr(
@@ -423,6 +500,8 @@ def test_cli_composes_prompt_cwd_and_model(
             "deepseek-v4-flash",
             "--output",
             "transcript",
+            "--tool-policy",
+            "deny",
         ],
         env={},
     )
@@ -434,6 +513,7 @@ def test_cli_composes_prompt_cwd_and_model(
             "deepseek-v4-flash",
             tmp_path.resolve(),
             PrintOutputMode.TRANSCRIPT,
+            ToolApprovalPolicy.DENY,
         )
     ]
 
@@ -492,8 +572,9 @@ def test_cli_uses_failure_exit_code(
         model: str,
         cwd: Path,
         output: PrintOutputMode,
+        tool_policy: ToolApprovalPolicy,
     ) -> bool:
-        del prompt, model, cwd, output
+        del prompt, model, cwd, output, tool_policy
         return False
 
     monkeypatch.setattr("axis_coding.cli.run_deepseek_print_mode", failed_run)
@@ -513,8 +594,9 @@ def test_cli_reports_resource_error_without_traceback(
         model: str,
         cwd: Path,
         output: PrintOutputMode,
+        tool_policy: ToolApprovalPolicy,
     ) -> bool:
-        del prompt, model, cwd, output
+        del prompt, model, cwd, output, tool_policy
         raise ResourceError("Unknown skill: missing")
 
     monkeypatch.setattr("axis_coding.cli.run_deepseek_print_mode", failed_run)

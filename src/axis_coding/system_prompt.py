@@ -29,7 +29,8 @@ OPERATING_PRINCIPLES = (
     "for changes.",
     "Tools run with the user's local permissions and are not a sandbox. Do not discard user "
     "work or run destructive commands unless the user explicitly requests it. Never expose "
-    "secrets or write credentials into the repository.",
+    "secrets or write credentials into the repository. Protected tools may require explicit "
+    "approval; treat a denial as final for that call and choose a safer alternative.",
     "Ask a question only when missing information would materially change the result.",
     "Lead with the outcome, communicate concisely, and show relevant file paths clearly.",
     "Respond in the user's language unless the user requests otherwise.",

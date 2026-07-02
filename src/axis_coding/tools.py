@@ -65,6 +65,7 @@ class ToolDefinition:
     prompt_guidelines: tuple[str, ...]
     input_schema: Mapping[str, JSONValue]
     executor: ToolExecutor
+    requires_approval: bool
 
     def to_agent_tool(self) -> AgentTool:
         """Narrow this application definition to the portable core contract."""
@@ -73,6 +74,7 @@ class ToolDefinition:
             description=self.description,
             input_schema=self.input_schema,
             executor=self.executor,
+            requires_approval=self.requires_approval,
             prompt_snippet=self.prompt_snippet,
             prompt_guidelines=self.prompt_guidelines,
         )
@@ -213,6 +215,7 @@ def create_read_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinit
             "required": ["path"],
         },
         executor=execute,
+        requires_approval=True,
     )
 
 
@@ -262,6 +265,7 @@ def create_write_tool_definition(*, cwd: str | Path | None = None) -> ToolDefini
             "required": ["path", "content"],
         },
         executor=execute,
+        requires_approval=True,
     )
 
 
@@ -353,6 +357,7 @@ def create_edit_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinit
             "additionalProperties": False,
         },
         executor=execute,
+        requires_approval=True,
     )
 
 
@@ -476,6 +481,7 @@ def create_bash_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinit
             "required": ["command"],
         },
         executor=execute,
+        requires_approval=True,
     )
 
 

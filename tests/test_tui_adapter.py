@@ -14,6 +14,8 @@ from axis_agent import (
     QueueUpdateEvent,
     RetryEvent,
     ThinkingDeltaEvent,
+    ToolApprovalRequestEvent,
+    ToolApprovalResolvedEvent,
     ToolCall,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -113,6 +115,20 @@ def test_tool_start_flushes_partial_assistant_and_uses_human_invocation() -> Non
         ("tool", "→ read README.md:1-80"),
     ]
     assert state.active_tool_count == 1
+
+
+def test_tool_approval_request_and_execution_start_share_one_item() -> None:
+    call = ToolCall(id="call-1", name="bash", arguments={"command": "echo hello"})
+    state = TuiState()
+    adapter = TuiEventAdapter(state)
+
+    adapter.apply(ToolApprovalRequestEvent(tool_call=call))
+    adapter.apply(ToolApprovalResolvedEvent(tool_call_id=call.id, decision="allow_once"))
+    adapter.apply(ToolExecutionStartEvent(tool_call=call))
+
+    assert [(item.role, item.text, item.tool_call_id) for item in state.items] == [
+        ("tool", "$ echo hello", "call-1")
+    ]
 
 
 def test_skill_file_read_uses_skill_role_and_attaches_result() -> None:

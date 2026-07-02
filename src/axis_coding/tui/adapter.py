@@ -11,6 +11,8 @@ from axis_agent import (
     QueueUpdateEvent,
     RetryEvent,
     ThinkingDeltaEvent,
+    ToolApprovalRequestEvent,
+    ToolApprovalResolvedEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -53,9 +55,14 @@ class TuiEventAdapter:
             self.state.assistant_buffer += event.delta
         elif isinstance(event, MessageEndEvent):
             self._apply_message_end(event)
+        elif isinstance(event, ToolApprovalRequestEvent):
+            self._flush_assistant_buffer()
+            self.state.ensure_tool_call(event.tool_call)
+        elif isinstance(event, ToolApprovalResolvedEvent):
+            pass
         elif isinstance(event, ToolExecutionStartEvent):
             self._flush_assistant_buffer()
-            self.state.add_tool_call(event.tool_call)
+            self.state.ensure_tool_call(event.tool_call)
         elif isinstance(event, ToolExecutionUpdateEvent):
             self.state.add_item("tool", f"… {event.message}")
         elif isinstance(event, ToolExecutionEndEvent):

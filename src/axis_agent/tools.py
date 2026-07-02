@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,6 +28,22 @@ class ToolExecutor(Protocol):
         signal: ToolCancellationToken | None = None,
     ) -> Awaitable[AgentToolResult]:
         """Execute a tool with JSON-like arguments."""
+        ...
+
+
+type ToolApprovalDecision = Literal["allow_once", "allow_session", "deny"]
+
+
+class ToolApprovalHandler(Protocol):
+    """Async decision boundary invoked before a protected tool executes."""
+
+    def __call__(
+        self,
+        tool: AgentTool,
+        tool_call: ToolCall,
+        signal: ToolCancellationToken | None = None,
+    ) -> Awaitable[ToolApprovalDecision]:
+        """Return the user's decision for one concrete tool call."""
         ...
 
 
@@ -63,6 +79,7 @@ class AgentTool:
     description: str
     input_schema: Mapping[str, JSONValue]
     executor: ToolExecutor
+    requires_approval: bool = False
     prompt_snippet: str | None = None
     prompt_guidelines: tuple[str, ...] = ()
 

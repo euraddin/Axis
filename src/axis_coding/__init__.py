@@ -24,6 +24,14 @@ from axis_coding.context_window import (
 )
 from axis_coding.credentials import CredentialStoreError, FileCredentialStore, credentials_path
 from axis_coding.paths import AxisPaths
+from axis_coding.permissions import (
+    PolicyToolApprovalHandler,
+    SessionToolApprovalController,
+    ToolApprovalPolicy,
+    ToolApprovalPreview,
+    approval_handler_for_policy,
+    build_tool_approval_preview,
+)
 from axis_coding.prompt_templates import (
     PromptTemplate,
     expand_prompt_template_command,
@@ -159,6 +167,7 @@ __all__ = [
     "ModelChoice",
     "OpenAICompatibleProviderConfig",
     "ProjectContextFile",
+    "PolicyToolApprovalHandler",
     "PromptTemplate",
     "ProviderCatalogEntry",
     "ProviderConfigError",
@@ -172,6 +181,7 @@ __all__ = [
     "SlashCommand",
     "SessionExportError",
     "SessionManager",
+    "SessionToolApprovalController",
     "SessionTreeBranchResult",
     "SessionTreeChoice",
     "ScopedModelConfig",
@@ -180,6 +190,8 @@ __all__ = [
     "ThinkingLevel",
     "ThinkingParameter",
     "ToolDefinition",
+    "ToolApprovalPolicy",
+    "ToolApprovalPreview",
     "ToolInputError",
     "TruncationResult",
     "create_bash_tool",
@@ -194,6 +206,7 @@ __all__ = [
     "create_write_tool",
     "create_write_tool_definition",
     "build_system_prompt",
+    "build_tool_approval_preview",
     "collect_tool_guidelines",
     "discover_project_context",
     "discover_project_context_with_diagnostics",
@@ -204,6 +217,7 @@ __all__ = [
     "estimate_text_tokens",
     "estimate_tool_tokens",
     "credentials_path",
+    "approval_handler_for_policy",
     "default_session_export_path",
     "expand_prompt_template_command",
     "expand_skill_command",

@@ -12,6 +12,8 @@ from axis_agent import (
     QueueUpdateEvent,
     RetryEvent,
     ThinkingDeltaEvent,
+    ToolApprovalRequestEvent,
+    ToolApprovalResolvedEvent,
     ToolCall,
     ToolExecutionEndEvent,
     ToolResultMessage,
@@ -303,6 +305,182 @@ def test_loop_executes_multiple_tool_calls_in_order_before_next_provider_turn() 
         "call-2",
     ]
     assert len(provider.calls) == 2
+
+
+def test_loop_waits_for_approval_before_executing_protected_tool() -> None:
+    execution_order: list[str] = []
+    approval_order: list[str] = []
+
+    async def executor(
+        arguments: Mapping[str, JSONValue],
+        signal: object | None = None,
+    ) -> AgentToolResult:
+        del arguments, signal
+        execution_order.append("execute")
+        return AgentToolResult(tool_call_id="ignored", name="write", ok=True, content="done")
+
+    async def approve(tool: AgentTool, tool_call: ToolCall, signal: object | None = None) -> str:
+        del signal
+        approval_order.append(f"{tool.name}:{tool_call.id}")
+        assert execution_order == []
+        return "allow_once"
+
+    tool = AgentTool(
+        "write",
+        "Write a file.",
+        {"type": "object"},
+        executor,
+        requires_approval=True,
+    )
+    call = ToolCall(id="call-1", name="write", arguments={"path": "a.py"})
+    provider = FakeProvider(
+        [
+            [ProviderResponseEndEvent(message=AssistantMessage(tool_calls=[call]))],
+            [ProviderResponseEndEvent(message=AssistantMessage(content="Done"))],
+        ]
+    )
+
+    events = asyncio.run(
+        collect_events(
+            run_agent_loop(
+                provider=provider,
+                model="fake-model",
+                system="You are Axis.",
+                messages=[UserMessage(content="Write")],
+                tools=[tool],
+                request_tool_approval=approve,  # type: ignore[arg-type]
+            )
+        )
+    )
+
+    request = next(event for event in events if isinstance(event, ToolApprovalRequestEvent))
+    resolved = next(event for event in events if isinstance(event, ToolApprovalResolvedEvent))
+    assert request.tool_call == call
+    assert resolved.decision == "allow_once"
+    assert approval_order == ["write:call-1"]
+    assert execution_order == ["execute"]
+    event_types = [event.type for event in events]
+    assert event_types.index("tool_approval_resolved") < event_types.index("tool_execution_start")
+
+
+def test_loop_denies_protected_tool_without_handler_and_preserves_protocol() -> None:
+    executed = False
+
+    async def executor(
+        arguments: Mapping[str, JSONValue],
+        signal: object | None = None,
+    ) -> AgentToolResult:
+        del arguments, signal
+        nonlocal executed
+        executed = True
+        return AgentToolResult(tool_call_id="ignored", name="bash", ok=True, content="unsafe")
+
+    tool = AgentTool(
+        "bash",
+        "Run shell.",
+        {"type": "object"},
+        executor,
+        requires_approval=True,
+    )
+    call = ToolCall(id="call-1", name="bash", arguments={"command": "touch unsafe"})
+    messages = [UserMessage(content="Run")]
+    provider = FakeProvider(
+        [
+            [ProviderResponseEndEvent(message=AssistantMessage(tool_calls=[call]))],
+            [ProviderResponseEndEvent(message=AssistantMessage(content="Denied"))],
+        ]
+    )
+
+    events = asyncio.run(
+        collect_events(
+            run_agent_loop(
+                provider=provider,
+                model="fake-model",
+                system="You are Axis.",
+                messages=messages,
+                tools=[tool],
+            )
+        )
+    )
+
+    result = next(message for message in messages if isinstance(message, ToolResultMessage))
+    resolved = next(event for event in events if isinstance(event, ToolApprovalResolvedEvent))
+    assert executed is False
+    assert resolved.decision == "deny"
+    assert resolved.reason == "No tool approval handler is configured"
+    assert result.tool_call_id == "call-1"
+    assert result.ok is False
+    assert result.error == "No tool approval handler is configured"
+    assert "tool_execution_start" not in [event.type for event in events]
+
+
+def test_loop_cancellation_while_waiting_for_approval_never_executes_tool() -> None:
+    class CancellationSignal:
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def is_cancelled(self) -> bool:
+            return self.cancelled
+
+    signal = CancellationSignal()
+    executed = False
+
+    async def executor(
+        arguments: Mapping[str, JSONValue],
+        signal: object | None = None,
+    ) -> AgentToolResult:
+        del arguments, signal
+        nonlocal executed
+        executed = True
+        return AgentToolResult(tool_call_id="ignored", name="write", ok=True, content="unsafe")
+
+    async def cancel_during_approval(
+        tool: AgentTool,
+        tool_call: ToolCall,
+        signal_arg: object | None = None,
+    ) -> str:
+        del tool, tool_call, signal_arg
+        signal.cancel()
+        return "allow_once"
+
+    call = ToolCall(id="call-1", name="write", arguments={"path": "unsafe"})
+    messages = [UserMessage(content="Write")]
+    provider = FakeProvider(
+        [[ProviderResponseEndEvent(message=AssistantMessage(tool_calls=[call]))]]
+    )
+
+    events = asyncio.run(
+        collect_events(
+            run_agent_loop(
+                provider=provider,
+                model="fake-model",
+                system="You are Axis.",
+                messages=messages,
+                tools=[
+                    AgentTool(
+                        "write",
+                        "Write",
+                        {"type": "object"},
+                        executor,
+                        requires_approval=True,
+                    )
+                ],
+                signal=signal,
+                request_tool_approval=cancel_during_approval,  # type: ignore[arg-type]
+            )
+        )
+    )
+
+    result = next(message for message in messages if isinstance(message, ToolResultMessage))
+    resolved = next(event for event in events if isinstance(event, ToolApprovalResolvedEvent))
+    assert executed is False
+    assert resolved.decision == "deny"
+    assert resolved.reason == "Tool approval cancelled"
+    assert result.error == "Tool approval cancelled"
+    assert any(isinstance(event, ErrorEvent) for event in events)
 
 
 def test_loop_records_unknown_tool_as_failed_result_and_continues() -> None:

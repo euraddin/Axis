@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Literal
 from axis_agent.events import AgentEvent, MessageEndEvent, MessageStartEvent, QueueUpdateEvent
 from axis_agent.loop import run_agent_loop
 from axis_agent.messages import AgentMessage, AssistantMessage, ToolResultMessage, UserMessage
-from axis_agent.tools import AgentTool
+from axis_agent.tools import AgentTool, ToolApprovalHandler
 
 if TYPE_CHECKING:
     from axis_ai.provider import ModelProvider
@@ -42,6 +42,7 @@ class AgentHarnessConfig:
     model: str
     system: str
     tools: list[AgentTool] = field(default_factory=list)
+    tool_approval_handler: ToolApprovalHandler | None = None
     max_turns: int | None = None
     queue_mode: QueueMode = "one_at_a_time"
 
@@ -202,6 +203,7 @@ class AgentHarness:
                 system=self._config.system,
                 messages=self._messages,
                 tools=self._config.tools,
+                request_tool_approval=self._config.tool_approval_handler,
                 max_turns=self._config.max_turns,
                 signal=signal,
                 get_steering_messages=self._drain_steering_messages,

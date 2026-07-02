@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 from axis_agent.messages import AgentMessage
-from axis_agent.tools import AgentToolResult, ToolCall
+from axis_agent.tools import AgentToolResult, ToolApprovalDecision, ToolCall
 from axis_agent.types import JSONValue
 
 
@@ -111,6 +111,26 @@ class ToolExecutionStartEvent(BaseModel):
     tool_call: ToolCall
 
 
+class ToolApprovalRequestEvent(BaseModel):
+    """A protected tool call is waiting for an external decision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["tool_approval_request"] = "tool_approval_request"
+    tool_call: ToolCall
+
+
+class ToolApprovalResolvedEvent(BaseModel):
+    """The external approval boundary resolved a protected tool call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["tool_approval_resolved"] = "tool_approval_resolved"
+    tool_call_id: str
+    decision: ToolApprovalDecision
+    reason: str | None = None
+
+
 class ToolExecutionUpdateEvent(BaseModel):
     """A running tool has emitted an intermediate update."""
 
@@ -153,6 +173,8 @@ type AgentEvent = (
     | MessageDeltaEvent
     | ThinkingDeltaEvent
     | MessageEndEvent
+    | ToolApprovalRequestEvent
+    | ToolApprovalResolvedEvent
     | ToolExecutionStartEvent
     | ToolExecutionUpdateEvent
     | ToolExecutionEndEvent

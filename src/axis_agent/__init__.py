@@ -11,6 +11,8 @@ from axis_agent.events import (
     QueueUpdateEvent,
     RetryEvent,
     ThinkingDeltaEvent,
+    ToolApprovalRequestEvent,
+    ToolApprovalResolvedEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -42,7 +44,13 @@ from axis_agent.session import (
     path_to_entry,
     validate_session_tree,
 )
-from axis_agent.tools import AgentTool, AgentToolResult, ToolCall
+from axis_agent.tools import (
+    AgentTool,
+    AgentToolResult,
+    ToolApprovalDecision,
+    ToolApprovalHandler,
+    ToolCall,
+)
 
 __all__ = [
     "AgentEndEvent",
@@ -75,6 +83,10 @@ __all__ = [
     "SessionStorage",
     "SessionTreeError",
     "ThinkingDeltaEvent",
+    "ToolApprovalDecision",
+    "ToolApprovalHandler",
+    "ToolApprovalRequestEvent",
+    "ToolApprovalResolvedEvent",
     "ToolCall",
     "ToolExecutionEndEvent",
     "ToolExecutionStartEvent",

@@ -89,10 +89,12 @@ def test_agent_tool_delegates_to_async_executor() -> None:
         description="Echo text.",
         input_schema={"type": "object"},
         executor=executor,
+        requires_approval=True,
     )
     signal = FakeCancellationToken()
 
     result = asyncio.run(tool.execute({"text": "hello"}, signal=signal))
 
     assert result.content == "hello"
+    assert tool.requires_approval is True
     assert observed == [({"text": "hello"}, signal)]

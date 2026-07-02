@@ -17,7 +17,17 @@ from textual.css.query import NoMatches
 from textual.events import Click, Key, Resize
 from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static, TextArea
+from textual.widgets import (
+    Button,
+    Footer,
+    Header,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    Static,
+    TextArea,
+)
 from textual.worker import Worker
 
 from axis_agent import (
@@ -28,8 +38,11 @@ from axis_agent import (
     MessageEndEvent,
     MessageStartEvent,
     ThinkingDeltaEvent,
+    ToolApprovalDecision,
+    ToolCall,
     TurnStartEvent,
 )
+from axis_agent.tools import AgentTool, ToolCancellationToken
 from axis_coding.commands import (
     CommandRegistry,
     CommandResult,
@@ -39,6 +52,11 @@ from axis_coding.commands import (
 )
 from axis_coding.context_window import ContextUsageEstimate
 from axis_coding.credentials import FileCredentialStore, credentials_path
+from axis_coding.permissions import (
+    SessionToolApprovalController,
+    ToolApprovalPreview,
+    build_tool_approval_preview,
+)
 from axis_coding.provider_catalog import (
     BUILTIN_PROVIDER_CATALOG,
     ProviderCatalogEntry,
@@ -503,6 +521,60 @@ class ThemePickerScreen(ModalScreen[TuiThemeName | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class ToolApprovalScreen(ModalScreen[ToolApprovalDecision]):
+    """Block a protected tool call until the user makes an explicit decision."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("enter", "allow_once", "Allow once"),
+        Binding("y", "allow_once", "Allow once", show=False),
+        Binding("a", "allow_session", "Allow session"),
+        Binding("d", "deny", "Deny"),
+        Binding("escape", "deny", "Deny"),
+    ]
+
+    def __init__(self, preview: ToolApprovalPreview) -> None:
+        super().__init__()
+        self.preview = preview
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="tool-approval"):
+            yield Static(self.preview.title, id="tool-approval-title")
+            yield Static(
+                self.preview.render_plain(),
+                id="tool-approval-details",
+                markup=False,
+            )
+            with Horizontal(id="tool-approval-actions"):
+                yield Button("Allow once", id="tool-approval-once", variant="success")
+                yield Button("Allow this tool", id="tool-approval-session", variant="primary")
+                yield Button("Deny", id="tool-approval-deny", variant="error")
+            yield Static(
+                "Enter/Y once · A allow this tool for session · D/Escape deny",
+                id="tool-approval-help",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#tool-approval-once", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        decisions: dict[str, ToolApprovalDecision] = {
+            "tool-approval-once": "allow_once",
+            "tool-approval-session": "allow_session",
+            "tool-approval-deny": "deny",
+        }
+        if event.button.id is not None:
+            self.dismiss(decisions[event.button.id])
+
+    def action_allow_once(self) -> None:
+        self.dismiss("allow_once")
+
+    def action_allow_session(self) -> None:
+        self.dismiss("allow_session")
+
+    def action_deny(self) -> None:
+        self.dismiss("deny")
 
 
 class ModelPickerScreen(ModalScreen[ModelChoice | None]):
@@ -1052,13 +1124,14 @@ class AxisTuiApp(App[None]):
 
     CommandOutputScreen, ThemePickerScreen, SessionPickerScreen, TreePickerScreen,
     BranchSummaryInstructionsScreen, ModelPickerScreen, LoginProviderPickerScreen,
-    LoginScreen {
+    LoginScreen, ToolApprovalScreen {
         align: center middle;
         background: $axis-screen-background 70%;
     }
 
     #command-output, #theme-picker, #session-picker, #tree-picker,
-    #branch-summary-instructions, #model-picker, #login-provider-picker, #login-screen {
+    #branch-summary-instructions, #model-picker, #login-provider-picker, #login-screen,
+    #tool-approval {
         width: 76;
         max-width: 90%;
         height: auto;
@@ -1071,7 +1144,7 @@ class AxisTuiApp(App[None]):
 
     #command-output-title, #theme-picker-title, #session-picker-title, #tree-picker-title,
     #branch-summary-instructions-title, #model-picker-title, #login-provider-title,
-    #login-title {
+    #login-title, #tool-approval-title {
         height: 1;
         margin-bottom: 1;
         text-style: bold;
@@ -1091,10 +1164,30 @@ class AxisTuiApp(App[None]):
 
     #command-output-help, #theme-picker-help, #session-picker-help, #tree-picker-help,
     #branch-summary-instructions-help, #model-picker-help, #login-provider-help,
-    #login-footer {
+    #login-footer, #tool-approval-help {
         height: 1;
         margin-top: 1;
         color: $axis-muted-text;
+    }
+
+    #tool-approval-details {
+        height: auto;
+        max-height: 18;
+        margin-bottom: 1;
+        padding: 1;
+        background: $axis-transcript-background;
+        border: tall $axis-border;
+        color: $axis-screen-text;
+        overflow-y: auto;
+    }
+
+    #tool-approval-actions {
+        height: 3;
+        align-horizontal: center;
+    }
+
+    #tool-approval-actions Button {
+        margin: 0 1;
     }
 
     #theme-picker-list, #session-picker-list, #tree-picker-list, #model-picker-list,
@@ -1159,6 +1252,10 @@ class AxisTuiApp(App[None]):
         self._prompt_worker: Worker[None] | None = None
         self._request_context_usage: ContextUsageEstimate | None = None
         self._request_context_turn: int | None = None
+        self._tool_approval_controller = SessionToolApprovalController(self._show_tool_approval)
+        set_approval_handler = getattr(session, "set_tool_approval_handler", None)
+        if callable(set_approval_handler):
+            set_approval_handler(self._tool_approval_controller)
 
     def get_theme_variable_defaults(self) -> dict[str, str]:
         """Add Axis theme variables used by the app stylesheet."""
@@ -1530,6 +1627,19 @@ class AxisTuiApp(App[None]):
             else:
                 prompt.focus()
                 self._render_state()
+
+    async def _show_tool_approval(
+        self,
+        tool: AgentTool,
+        tool_call: ToolCall,
+        signal: ToolCancellationToken | None = None,
+    ) -> ToolApprovalDecision:
+        del tool
+        if signal is not None and signal.is_cancelled():
+            return "deny"
+        preview = build_tool_approval_preview(tool_call, cwd=self.session.cwd)
+        decision = await self.push_screen_wait(ToolApprovalScreen(preview))
+        return decision if decision in {"allow_once", "allow_session", "deny"} else "deny"
 
     async def _run_terminal_command(self, command: str, *, add_to_context: bool) -> None:
         self._terminal_active = True

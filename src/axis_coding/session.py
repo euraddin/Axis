@@ -25,6 +25,7 @@ from axis_agent import (
     SessionState,
     SessionStorage,
     ThinkingLevelChangeEntry,
+    ToolApprovalHandler,
     UserMessage,
     path_to_entry,
 )
@@ -158,6 +159,7 @@ class CodingSessionConfig:
     cwd: Path
     system: str | None = None
     tools: list[AgentTool] | None = None
+    tool_approval_handler: ToolApprovalHandler | None = None
     resource_paths: AxisResourcePaths | None = None
     session_id: str | None = None
     session_manager: SessionManager | None = None
@@ -289,6 +291,7 @@ class CodingSession:
                 model=state.model or config.model,
                 system=system,
                 tools=tools,
+                tool_approval_handler=config.tool_approval_handler,
             ),
             messages=state.messages,
         )
@@ -503,6 +506,11 @@ class CodingSession:
         self._harness.cancel()
         if self._terminal_signal is not None:
             self._terminal_signal.cancel()
+
+    def set_tool_approval_handler(self, handler: ToolApprovalHandler | None) -> None:
+        """Replace the protected-tool decision boundary for future calls."""
+        self._config = replace(self._config, tool_approval_handler=handler)
+        self._harness.config.tool_approval_handler = handler
 
     def queue_update_event(self) -> QueueUpdateEvent:
         """Return the authoritative queue snapshot."""

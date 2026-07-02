@@ -24,6 +24,7 @@ from axis_coding import (
     AxisResourcePaths,
     CodingSession,
     CodingSessionConfig,
+    ToolApprovalPolicy,
 )
 from axis_coding.cli import run_print_mode
 from axis_coding.rendering import PrintOutputMode
@@ -85,6 +86,7 @@ def test_v1_fake_provider_tool_session_persistence_and_restart(tmp_path: Path) -
             storage=storage,
             resource_paths=paths,
             output=PrintOutputMode.JSON,
+            tool_policy=ToolApprovalPolicy.ALLOW,
             stdout=stdout,
             stderr=stderr,
         )

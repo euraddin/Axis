@@ -15,6 +15,10 @@ from axis_ai import (
 from axis_coding import __version__
 from axis_coding.credentials import FileCredentialStore, credentials_path
 from axis_coding.paths import AxisPaths
+from axis_coding.permissions import (
+    ToolApprovalPolicy,
+    approval_handler_for_policy,
+)
 from axis_coding.provider_config import (
     OpenAICompatibleProviderConfig,
     ProviderConfigError,
@@ -83,6 +87,13 @@ def main(
         PrintOutputMode,
         typer.Option("--output", "-o", help="Output format for print mode."),
     ] = PrintOutputMode.TEXT,
+    tool_policy: Annotated[
+        ToolApprovalPolicy,
+        typer.Option(
+            "--tool-policy",
+            help="Protected-tool policy for print mode: ask, deny, or allow.",
+        ),
+    ] = ToolApprovalPolicy.ASK,
     version: Annotated[
         bool,
         typer.Option("--version", help="Show Axis's version and exit."),
@@ -117,6 +128,7 @@ def main(
                 model=selected_model,
                 cwd=root,
                 output=output,
+                tool_policy=tool_policy,
             )
         )
     except (ProviderConfigError, ResourceError, RuntimeError, TuiConfigError) as exc:
@@ -320,6 +332,7 @@ async def run_deepseek_print_mode(
     model: str,
     cwd: Path,
     output: PrintOutputMode = PrintOutputMode.TEXT,
+    tool_policy: ToolApprovalPolicy = ToolApprovalPolicy.ASK,
     paths: AxisPaths | None = None,
 ) -> bool:
     """Run print mode with the environment-configured DeepSeek provider."""
@@ -364,6 +377,7 @@ async def run_deepseek_print_mode(
             runtime_provider_config=provider_config,
             thinking_level=thinking_level,
             output=output,
+            tool_policy=tool_policy,
         )
     finally:
         await provider.aclose()
@@ -384,6 +398,8 @@ async def run_print_mode(
     runtime_provider_config: OpenAICompatibleProviderConfig | None = None,
     thinking_level: ThinkingLevel = "xhigh",
     output: PrintOutputMode = PrintOutputMode.TEXT,
+    tool_policy: ToolApprovalPolicy = ToolApprovalPolicy.ASK,
+    stdin: TextIO | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> bool:
@@ -401,6 +417,12 @@ async def run_print_mode(
             provider_settings=provider_settings,
             runtime_provider_config=runtime_provider_config,
             thinking_level=thinking_level,
+            tool_approval_handler=approval_handler_for_policy(
+                tool_policy,
+                cwd=cwd,
+                stdin=stdin,
+                stderr=stderr,
+            ),
         )
     )
     renderer = create_event_renderer(output, stdout=stdout, stderr=stderr)

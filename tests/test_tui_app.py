@@ -69,6 +69,7 @@ from axis_coding.tui import (
     SessionSidebar,
     StreamingTranscriptMessageWidget,
     ThemePickerScreen,
+    ToolApprovalScreen,
     TranscriptMessageWidget,
     TranscriptView,
     TreePickerScreen,
@@ -713,6 +714,74 @@ def test_tui_tracks_complete_tool_round_trip(tmp_path: Path) -> None:
             assert "system " in request_text
             assert "messages " in request_text
             assert "tools " in request_text
+
+    asyncio.run(scenario())
+
+
+def test_tui_denies_protected_tool_before_any_side_effect(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        executed: list[str] = []
+
+        async def execute(
+            arguments: Mapping[str, JSONValue],
+            signal: object | None = None,
+        ) -> AgentToolResult:
+            del signal
+            executed.append(str(arguments["command"]))
+            return AgentToolResult(
+                tool_call_id="ignored",
+                name="bash",
+                ok=True,
+                content="unsafe",
+            )
+
+        call = ToolCall(
+            id="call-approval",
+            name="bash",
+            arguments={"command": "touch should-not-exist"},
+        )
+        provider = FakeProvider(
+            [
+                [ProviderResponseEndEvent(message=AssistantMessage(tool_calls=[call]))],
+                [ProviderResponseEndEvent(message=AssistantMessage(content="Understood"))],
+            ]
+        )
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,
+                model="fake",
+                storage=JsonlSessionStorage(tmp_path / "approval-session.jsonl"),
+                cwd=tmp_path,
+                tools=[
+                    AgentTool(
+                        "bash",
+                        "Run shell",
+                        {"type": "object"},
+                        execute,
+                        requires_approval=True,
+                    )
+                ],
+            )
+        )
+        app = AxisTuiApp(session)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "Run command"
+            await pilot.press("enter")
+            await wait_until(lambda: isinstance(app.screen, ToolApprovalScreen))
+
+            assert executed == []
+            details = str(app.screen.query_one("#tool-approval-details", Static).render())
+            assert "touch should-not-exist" in details
+            assert str(tmp_path) in details
+
+            await pilot.press("d")
+            await wait_until(lambda: len(provider.calls) == 2 and not session.is_running)
+
+            assert executed == []
+            tool_item = next(item for item in app.state.items if item.tool_call_id == call.id)
+            assert tool_item.tool_result_text == "✗ bash\nTool call denied by user"
 
     asyncio.run(scenario())
 

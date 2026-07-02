@@ -106,20 +106,26 @@ class TuiState:
             return
         self.add_item("thinking", delta)
 
-    def add_tool_call(self, tool_call: ToolCall) -> None:
+    def add_tool_call(self, tool_call: ToolCall) -> ChatItem:
         """Append one collapsed invocation, recognizing reads of known skills."""
         if skill_name := self._read_skill_name(tool_call):
-            self.add_item(
+            return self.add_item(
                 "skill",
                 f"Loading skill: {skill_name}",
                 tool_call_id=tool_call.id,
             )
-            return
-        self.add_item(
+        return self.add_item(
             "tool",
             format_tool_call_block(tool_call),
             tool_call_id=tool_call.id,
         )
+
+    def ensure_tool_call(self, tool_call: ToolCall) -> ChatItem:
+        """Return an existing invocation or append it once for approval/execution events."""
+        for item in reversed(self.items):
+            if item.role in {"tool", "skill"} and item.tool_call_id == tool_call.id:
+                return item
+        return self.add_tool_call(tool_call)
 
     def record_tool_result(self, result: AgentToolResult) -> None:
         """Attach a result by call id or preserve it as an orphaned tool item."""

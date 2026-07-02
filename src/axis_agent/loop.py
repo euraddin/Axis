@@ -16,13 +16,21 @@ from axis_agent.events import (
     QueueUpdateEvent,
     RetryEvent,
     ThinkingDeltaEvent,
+    ToolApprovalRequestEvent,
+    ToolApprovalResolvedEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     TurnEndEvent,
     TurnStartEvent,
 )
 from axis_agent.messages import AgentMessage, AssistantMessage, ToolResultMessage
-from axis_agent.tools import AgentTool, AgentToolResult, ToolCall
+from axis_agent.tools import (
+    AgentTool,
+    AgentToolResult,
+    ToolApprovalDecision,
+    ToolApprovalHandler,
+    ToolCall,
+)
 from axis_agent.types import JSONValue
 
 if TYPE_CHECKING:
@@ -41,6 +49,7 @@ async def run_agent_loop(
     get_steering_messages: Callable[[], Sequence[AgentMessage]] | None = None,
     get_follow_up_messages: Callable[[], Sequence[AgentMessage]] | None = None,
     get_queue_update: Callable[[], QueueUpdateEvent] | None = None,
+    request_tool_approval: ToolApprovalHandler | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run provider/tool turns until the assistant stops requesting tools.
 
@@ -154,6 +163,7 @@ async def run_agent_loop(
             tool_by_name,
             messages,
             signal,
+            request_tool_approval,
         ):
             yield tool_event
 
@@ -202,6 +212,7 @@ async def _execute_tool_calls(
     tool_by_name: Mapping[str, AgentTool],
     messages: list[AgentMessage],
     signal: CancellationToken | None,
+    request_tool_approval: ToolApprovalHandler | None,
 ) -> AsyncIterator[AgentEvent]:
     for index, tool_call in enumerate(tool_calls):
         if signal is not None and signal.is_cancelled():
@@ -212,12 +223,30 @@ async def _execute_tool_calls(
             yield ErrorEvent(message="Agent run cancelled", recoverable=True)
             return
 
-        yield ToolExecutionStartEvent(tool_call=tool_call)
-
         tool = tool_by_name.get(tool_call.name)
         if tool is None:
+            yield ToolExecutionStartEvent(tool_call=tool_call)
             result = _unknown_tool_result(tool_call)
         else:
+            if tool.requires_approval:
+                yield ToolApprovalRequestEvent(tool_call=tool_call)
+                decision, reason = await _resolve_tool_approval(
+                    tool,
+                    tool_call,
+                    signal,
+                    request_tool_approval,
+                )
+                yield ToolApprovalResolvedEvent(
+                    tool_call_id=tool_call.id,
+                    decision=decision,
+                    reason=reason,
+                )
+                if decision == "deny":
+                    result = _denied_tool_result(tool_call, reason)
+                    messages.append(_tool_result_message(result))
+                    yield ToolExecutionEndEvent(result=result)
+                    continue
+            yield ToolExecutionStartEvent(tool_call=tool_call)
             result = await _execute_tool(tool, tool_call, signal)
 
         messages.append(_tool_result_message(result))
@@ -248,6 +277,29 @@ async def _execute_tool(
     return result
 
 
+async def _resolve_tool_approval(
+    tool: AgentTool,
+    tool_call: ToolCall,
+    signal: CancellationToken | None,
+    request_tool_approval: ToolApprovalHandler | None,
+) -> tuple[ToolApprovalDecision, str | None]:
+    if signal is not None and signal.is_cancelled():
+        return "deny", "Tool approval cancelled"
+    if request_tool_approval is None:
+        return "deny", "No tool approval handler is configured"
+    try:
+        decision = await request_tool_approval(tool, tool_call, signal)
+    except Exception as exc:  # noqa: BLE001 - approval must fail closed
+        return "deny", f"Tool approval failed: {exc}"
+    if signal is not None and signal.is_cancelled():
+        return "deny", "Tool approval cancelled"
+    if decision not in {"allow_once", "allow_session", "deny"}:
+        return "deny", f"Invalid tool approval decision: {decision}"
+    if decision == "deny":
+        return decision, "Tool call denied by user"
+    return decision, None
+
+
 def _unknown_tool_result(tool_call: ToolCall) -> AgentToolResult:
     message = f"Unknown tool: {tool_call.name}"
     return AgentToolResult(
@@ -261,6 +313,17 @@ def _unknown_tool_result(tool_call: ToolCall) -> AgentToolResult:
 
 def _cancelled_tool_result(tool_call: ToolCall) -> AgentToolResult:
     message = "Tool call cancelled"
+    return AgentToolResult(
+        tool_call_id=tool_call.id,
+        name=tool_call.name,
+        ok=False,
+        content=message,
+        error=message,
+    )
+
+
+def _denied_tool_result(tool_call: ToolCall, reason: str | None) -> AgentToolResult:
+    message = reason or "Tool call denied by user"
     return AgentToolResult(
         tool_call_id=tool_call.id,
         name=tool_call.name,

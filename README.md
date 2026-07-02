@@ -60,7 +60,8 @@ smoke 默认使用 `deepseek-v4-pro`、thinking 与 128 token 输出上限。可
 
 - 密钥只能通过环境变量或被 Git 忽略的本地 `.env` 提供；`.env.example` 必须保持为明显的无效占位符。
 - 如果凭据曾进入 Git，即使当前文件已经删除或替换，也必须先在服务端撤销/轮换，再处理公开历史。
-- `read`、`write`、`edit` 与 `bash` 采用本地信任模型：允许绝对路径和任意 shell，不是权限沙箱。
+- 模型发起 `read`、`write`、`edit` 或 `bash` 时，TUI 会在执行前展示参数并要求用户选择单次允许、本会话允许该工具或拒绝。
+- 工具仍采用本地信任模型：允许绝对路径和任意 shell；人工审批不是操作系统权限沙箱。
 - JSONL session 会保存完整 prompt、reasoning metadata、工具结果和 system snapshot，应按本地敏感开发数据保护。
 
 ## Print CLI
@@ -72,9 +73,10 @@ axis -p "运行测试并修复失败" --cwd /path/to/project
 axis -p "检查代码" --model deepseek-v4-flash
 axis -p "检查代码" --output json
 axis -p "检查代码" --output transcript
+axis -p "运行测试" --tool-policy allow
 ```
 
-Print CLI 会启用 `read`、`write`、`edit`、`bash` 四个本地工具。它采用本地信任模型，不是权限沙箱。
+Print CLI 会启用四个本地工具，`--tool-policy ask|deny|allow` 默认使用 `ask`。没有交互 TTY 时 `ask` 会安全拒绝工具；自动化若要执行工具，必须显式传入 `--tool-policy allow`。该审批层不是权限沙箱。
 
 每次真实 DeepSeek print-mode 运行都会创建独立 JSONL 会话：
 
