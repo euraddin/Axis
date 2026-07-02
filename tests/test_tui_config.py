@@ -9,6 +9,7 @@ from axis_coding.tui.config import (
     AXIS_DARK_THEME,
     AXIS_LIGHT_THEME,
     HIGH_CONTRAST_THEME,
+    OMNI_THEME,
     TuiConfigError,
     TuiKeybindings,
     TuiSettings,
@@ -164,8 +165,23 @@ def test_builtin_themes_match_axis_brand_names_and_tau_visual_contract() -> None
     assert get_tui_theme() == AXIS_DARK_THEME
     assert get_tui_theme("axis-light") == AXIS_LIGHT_THEME
     assert get_tui_theme("high-contrast") == HIGH_CONTRAST_THEME
+    assert get_tui_theme("omni") == OMNI_THEME
     assert AXIS_DARK_THEME.screen_background == "#000000"
     assert AXIS_DARK_THEME.accent == "#db945a"
     assert AXIS_LIGHT_THEME.screen_background == "#ffffff"
     assert AXIS_LIGHT_THEME.syntax_theme == "ansi_light"
     assert HIGH_CONTRAST_THEME.prompt_border == "#00ff66"
+    assert OMNI_THEME.screen_background == "#191622"
+    assert OMNI_THEME.screen_text == "#E1E1E6"
+    assert OMNI_THEME.accent == "#FF79C6"
+    assert OMNI_THEME.markdown_inline_code == "#67E480"
+
+
+def test_omni_theme_round_trips_through_settings(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    settings = TuiSettings(theme="omni")
+
+    save_tui_settings(settings, paths)
+
+    assert load_tui_settings(paths) == settings
+    assert load_tui_settings(paths).resolved_theme == OMNI_THEME

@@ -49,7 +49,7 @@ class TuiKeybindings:
         }
 
 
-type TuiThemeName = Literal["axis-dark", "axis-light", "high-contrast"]
+type TuiThemeName = Literal["axis-dark", "axis-light", "high-contrast", "omni"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,10 +217,54 @@ HIGH_CONTRAST_THEME = TuiTheme(
     },
 )
 
+# Inspired by Omni Theme's MIT-licensed palette:
+# https://github.com/getomni/omni
+OMNI_THEME = TuiTheme(
+    name="omni",
+    screen_background="#191622",
+    screen_text="#E1E1E6",
+    chrome_background="#15121E",
+    chrome_text="#E1E1E6",
+    muted_text="#5A4B81",
+    sidebar_background="#13111B",
+    border="#5A4B81",
+    transcript_background="#191622",
+    prompt_background="#201B2D",
+    prompt_text="#E1E1E6",
+    prompt_border="#988BC7",
+    autocomplete_background="#13111B",
+    accent="#FF79C6",
+    highlight_background="#41414D",
+    highlight_text="#E1E1E6",
+    markdown_heading="#78D1E1",
+    markdown_table_header="#988BC7",
+    markdown_table_border="#5A4B81",
+    markdown_inline_code="#67E480",
+    markdown_code_block_background="#201B2D",
+    markdown_link="#78D1E1",
+    markdown_bullet="#FF79C6",
+    completion_selected="bold #E1E1E6 on #41414D",
+    completion_selected_description="#E1E1E6 on #41414D",
+    completion_description="#5A4B81",
+    syntax_theme="ansi_dark",
+    role_styles={
+        "user": TuiRoleStyle(border="#988BC7", body="#E1E1E6 on #191622"),
+        "assistant": TuiRoleStyle(border="#67E480", body="#E1E1E6 on #191622"),
+        "tool": TuiRoleStyle(border="#E89E64", body="#E7DE79 on #191622"),
+        "error": TuiRoleStyle(border="#E96379", body="#E96379 on #191622"),
+        "status": TuiRoleStyle(border="#5A4B81", body="#988BC7 on #191622"),
+        "thinking": TuiRoleStyle(border="#78D1E1", body="#988BC7 on #191622"),
+        "skill": TuiRoleStyle(border="#FF79C6", body="#FF79C6 on #191622"),
+        "branch_summary": TuiRoleStyle(border="#78D1E1", body="#78D1E1 on #191622"),
+        "compaction_summary": TuiRoleStyle(border="#78D1E1", body="#78D1E1 on #191622"),
+    },
+)
+
 _THEMES: dict[TuiThemeName, TuiTheme] = {
     AXIS_DARK_THEME.name: AXIS_DARK_THEME,
     AXIS_LIGHT_THEME.name: AXIS_LIGHT_THEME,
     HIGH_CONTRAST_THEME.name: HIGH_CONTRAST_THEME,
+    OMNI_THEME.name: OMNI_THEME,
 }
 BUILTIN_TUI_THEME_NAMES: tuple[TuiThemeName, ...] = tuple(_THEMES)
 

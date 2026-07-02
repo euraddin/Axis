@@ -507,6 +507,21 @@ def test_tui_app_uses_theme_variables_and_configured_keys(tmp_path: Path) -> Non
     assert app._bindings.key_to_bindings["f10"][0].action == "exit_app"
 
 
+def test_tui_app_maps_omni_palette_and_registers_picker_option(tmp_path: Path) -> None:
+    app = AxisTuiApp(
+        CancellableSession(tmp_path),
+        tui_settings=TuiSettings(theme="omni"),
+    )
+
+    variables = app.get_theme_variable_defaults()
+    assert variables["axis-screen-background"] == "#191622"
+    assert variables["axis-sidebar-background"] == "#13111B"
+    assert variables["axis-prompt-background"] == "#201B2D"
+    assert variables["axis-accent"] == "#FF79C6"
+    assert variables["axis-markdown-inline-code"] == "#67E480"
+    assert ThemePickerScreen("omni").theme_names[-1] == "omni"
+
+
 def test_tui_submits_and_renders_streamed_thinking_and_markdown(tmp_path: Path) -> None:
     async def scenario() -> None:
         provider = FakeProvider(
