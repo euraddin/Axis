@@ -28,6 +28,7 @@ class TuiKeybindings:
     toggle_thinking: str = "ctrl+t"
     toggle_tool_results: str = "ctrl+o"
     copy_message: str = "ctrl+c"
+    voice_record: str = "f2"
     quit: str = "ctrl+d"
 
     def to_json(self) -> dict[str, str]:
@@ -45,6 +46,7 @@ class TuiKeybindings:
             "toggle_thinking": self.toggle_thinking,
             "toggle_tool_results": self.toggle_tool_results,
             "copy_message": self.copy_message,
+            "voice_record": self.voice_record,
             "quit": self.quit,
         }
 

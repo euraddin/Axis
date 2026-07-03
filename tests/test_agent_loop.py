@@ -483,6 +483,122 @@ def test_loop_cancellation_while_waiting_for_approval_never_executes_tool() -> N
     assert any(isinstance(event, ErrorEvent) for event in events)
 
 
+def test_loop_auto_approves_read_only_bash_without_emitting_approval_events() -> None:
+    executed: list[str] = []
+    approval_handler_called: list[str] = []
+
+    async def executor(
+        arguments: Mapping[str, JSONValue],
+        signal: object | None = None,
+    ) -> AgentToolResult:
+        del signal
+        executed.append(str(arguments["command"]))
+        return AgentToolResult(tool_call_id="ignored", name="bash", ok=True, content="ok")
+
+    async def approve(tool: AgentTool, tool_call: ToolCall, signal: object | None = None) -> str:
+        del signal
+        approval_handler_called.append(f"{tool.name}:{tool_call.id}")
+        return "allow_once"
+
+    read_only = ToolCall(id="call-find", name="bash", arguments={"command": "find . -name '*.py'"})
+    destructive = ToolCall(
+        id="call-rm", name="bash", arguments={"command": "rm -rf /tmp/test"}
+    )
+    provider = FakeProvider(
+        [
+            [
+                ProviderResponseEndEvent(
+                    message=AssistantMessage(tool_calls=[read_only, destructive])
+                )
+            ],
+            [ProviderResponseEndEvent(message=AssistantMessage(content="Done"))],
+        ]
+    )
+    messages = [UserMessage(content="Find and remove")]
+
+    events = asyncio.run(
+        collect_events(
+            run_agent_loop(
+                provider=provider,
+                model="fake-model",
+                system="You are Axis.",
+                messages=messages,
+                tools=[
+                    AgentTool(
+                        "bash",
+                        "Run shell.",
+                        {"type": "object"},
+                        executor,
+                        requires_approval=True,
+                        auto_approve_if=lambda args: str(args.get("command", "")).startswith(
+                            "find"
+                        ),
+                    )
+                ],
+                request_tool_approval=approve,  # type: ignore[arg-type]
+            )
+        )
+    )
+
+    # find: auto-approved, no approval events emitted
+    # rm: still goes through approval
+    assert executed == ["find . -name '*.py'", "rm -rf /tmp/test"]
+    assert approval_handler_called == ["bash:call-rm"]
+    assert [e.type for e in events].count("tool_approval_request") == 1
+    assert [e.type for e in events].count("tool_approval_resolved") == 1
+
+
+def test_loop_auto_approval_exception_falls_closed() -> None:
+    executed = False
+
+    async def executor(
+        arguments: Mapping[str, JSONValue],
+        signal: object | None = None,
+    ) -> AgentToolResult:
+        del arguments, signal
+        nonlocal executed
+        executed = True
+        return AgentToolResult(tool_call_id="ignored", name="bash", ok=True, content="ok")
+
+    def bad_classifier(args: Mapping[str, JSONValue]) -> bool:
+        raise RuntimeError("unexpected")
+
+    tool = AgentTool(
+        "bash",
+        "Run shell.",
+        {"type": "object"},
+        executor,
+        requires_approval=True,
+        auto_approve_if=bad_classifier,
+    )
+    call = ToolCall(id="call-1", name="bash", arguments={"command": "ls"})
+    messages = [UserMessage(content="List")]
+    provider = FakeProvider(
+        [
+            [ProviderResponseEndEvent(message=AssistantMessage(tool_calls=[call]))],
+            [ProviderResponseEndEvent(message=AssistantMessage(content="Done"))],
+        ]
+    )
+
+    # classifier raising an exception → approved False → enters approval flow
+    events = asyncio.run(
+        collect_events(
+            run_agent_loop(
+                provider=provider,
+                model="fake-model",
+                system="You are Axis.",
+                messages=messages,
+                tools=[tool],
+            )
+        )
+    )
+
+    # No approval handler → denied, tool never executed
+    assert executed is False
+    resolved = next(e for e in events if isinstance(e, ToolApprovalResolvedEvent))
+    assert resolved.decision == "deny"
+
+
 def test_loop_records_unknown_tool_as_failed_result_and_continues() -> None:
     tool_call = ToolCall(id="call-1", name="missing")
     provider = FakeProvider(

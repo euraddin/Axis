@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -80,6 +80,9 @@ class AgentTool:
     input_schema: Mapping[str, JSONValue]
     executor: ToolExecutor
     requires_approval: bool = False
+    auto_approve_if: Callable[[Mapping[str, JSONValue]], bool] | None = field(
+        default=None, compare=False, hash=False
+    )
     prompt_snippet: str | None = None
     prompt_guidelines: tuple[str, ...] = ()
 

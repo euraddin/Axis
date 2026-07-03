@@ -21,7 +21,7 @@ from textual.selection import Selection
 from textual.widgets import Markdown as TextualMarkdown
 from textual.widgets import Static
 
-from axis_coding.context_window import ContextUsageEstimate
+from axis_coding.context_window import ContextUsageEstimate, RequestContextBreakdown
 from axis_coding.tui.autocomplete import CompletionState
 from axis_coding.tui.config import AXIS_DARK_THEME, TuiRoleStyle, TuiTheme
 from axis_coding.tui.state import ChatItem, TuiState, visible_chat_text
@@ -170,19 +170,25 @@ def render_compact_session_info(
 
 
 def render_request_context_usage(
-    usage: ContextUsageEstimate,
+    usage: ContextUsageEstimate | RequestContextBreakdown,
     *,
-    turn: int,
+    turn: int | None = None,
     theme: TuiTheme = AXIS_DARK_THEME,
 ) -> Text:
     """Render the estimated input composition of one Provider request."""
     rendered = Text(style=theme.completion_description, overflow="fold", no_wrap=False)
-    rendered.append(f"request {turn} estimate · total ≈{usage.total_tokens:,} tokens · ")
-    parts = (
-        ("system", usage.system_tokens),
-        ("messages", usage.message_tokens),
-        ("tools", usage.tool_tokens),
-    )
+    parts: tuple[tuple[str, int], ...]
+    if isinstance(usage, ContextUsageEstimate):
+        label = f"request {turn}" if turn is not None else "agent request"
+        parts = (
+            ("system", usage.system_tokens),
+            ("messages", usage.message_tokens),
+            ("tools", usage.tool_tokens),
+        )
+    else:
+        label = usage.kind.casefold()
+        parts = tuple((part.name, part.estimated_tokens) for part in usage.parts)
+    rendered.append(f"{label} estimate · total ≈{usage.total_tokens:,} tokens · ")
     for index, (label, tokens) in enumerate(parts):
         if index:
             rendered.append(" · ")
@@ -377,7 +383,7 @@ class TranscriptMessageWidget(Horizontal):
     TranscriptMessageWidget {
         width: 1fr;
         height: auto;
-        margin: 1 1 2 0;
+        margin: 1 1 1 0;
     }
 
     TranscriptMessageWidget > .transcript-message-gutter {
@@ -392,7 +398,7 @@ class TranscriptMessageWidget(Horizontal):
     }
 
     TranscriptMessageWidget > .transcript-markdown-body > MarkdownParagraph {
-        margin: 0 0 1 0;
+        margin: 0 0 0 0;
     }
     """
 
@@ -458,12 +464,12 @@ class StreamingTranscriptMessageWidget(ThemedMarkdownWidget):
     StreamingTranscriptMessageWidget {
         width: 1fr;
         height: auto;
-        margin: 1 1 2 1;
+        margin: 1 1 1 1;
         padding: 0 1 0 0;
     }
 
     StreamingTranscriptMessageWidget > MarkdownParagraph {
-        margin: 0 0 1 0;
+        margin: 0 0 0 0;
     }
     """
 

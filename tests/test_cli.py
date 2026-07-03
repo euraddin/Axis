@@ -438,8 +438,9 @@ def test_deepseek_tui_resumes_explicit_session_provider_and_model(
         *,
         startup_message: str | None = None,
         initial_prompt: str | None = None,
+        paths: AxisPaths | None = None,
     ) -> None:
-        del startup_message, initial_prompt
+        del startup_message, initial_prompt, paths
         observed.append((session.session_id, session.provider_name, session.model))
 
     monkeypatch.setattr(
@@ -676,8 +677,9 @@ def test_deepseek_tui_wrapper_owns_provider_and_persistent_session(
         *,
         startup_message: str | None = None,
         initial_prompt: str | None = None,
+        paths: AxisPaths | None = None,
     ) -> None:
-        del startup_message, initial_prompt
+        del startup_message, initial_prompt, paths
         observed_models.append(session.model)
         async for _event in session.prompt("TUI prompt"):
             pass
@@ -731,8 +733,9 @@ def test_deepseek_tui_opens_login_capable_ui_without_credentials(
         *,
         startup_message: str | None = None,
         initial_prompt: str | None = None,
+        paths: AxisPaths | None = None,
     ) -> None:
-        del initial_prompt
+        del initial_prompt, paths
         observed.append((session.provider_name, startup_message))
 
     monkeypatch.setattr("axis_coding.cli.create_model_provider", missing_provider)

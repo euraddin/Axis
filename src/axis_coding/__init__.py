@@ -16,6 +16,9 @@ from axis_coding.context import (
 from axis_coding.context_window import (
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     ContextUsageEstimate,
+    RequestContextBreakdown,
+    RequestContextPart,
+    context_usage_breakdown,
     estimate_context_tokens,
     estimate_context_usage,
     estimate_message_tokens,
@@ -142,6 +145,14 @@ from axis_coding.tools import (
     truncate_head,
     truncate_tail,
 )
+from axis_coding.voice import (
+    VoiceContextSnapshot,
+    VoiceInputConfig,
+    VoiceInputController,
+    VoiceInputEvent,
+    VolcengineSeedAsrProvider,
+    build_voice_context_snapshot,
+)
 
 __version__ = "0.1.0"
 
@@ -158,6 +169,8 @@ __all__ = [
     "CommandRegistry",
     "CommandResult",
     "ContextUsageEstimate",
+    "RequestContextBreakdown",
+    "RequestContextPart",
     "OPERATING_PRINCIPLES",
     "DEFAULT_PROVIDER_NAME",
     "DEFAULT_CONTEXT_WINDOW_TOKENS",
@@ -194,6 +207,12 @@ __all__ = [
     "ToolApprovalPreview",
     "ToolInputError",
     "TruncationResult",
+    "VoiceContextSnapshot",
+    "VoiceInputConfig",
+    "VoiceInputController",
+    "VoiceInputEvent",
+    "VolcengineSeedAsrProvider",
+    "build_voice_context_snapshot",
     "create_bash_tool",
     "create_bash_tool_definition",
     "create_coding_tools",
@@ -208,6 +227,7 @@ __all__ = [
     "build_system_prompt",
     "build_tool_approval_preview",
     "collect_tool_guidelines",
+    "context_usage_breakdown",
     "discover_project_context",
     "discover_project_context_with_diagnostics",
     "derive_markdown_description",

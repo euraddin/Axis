@@ -7,8 +7,8 @@ import json
 import os
 import signal
 import tempfile
-from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -66,6 +66,9 @@ class ToolDefinition:
     input_schema: Mapping[str, JSONValue]
     executor: ToolExecutor
     requires_approval: bool
+    auto_approve_if: Callable[[Mapping[str, JSONValue]], bool] | None = field(
+        default=None, compare=False, hash=False
+    )
 
     def to_agent_tool(self) -> AgentTool:
         """Narrow this application definition to the portable core contract."""
@@ -75,6 +78,7 @@ class ToolDefinition:
             input_schema=self.input_schema,
             executor=self.executor,
             requires_approval=self.requires_approval,
+            auto_approve_if=self.auto_approve_if,
             prompt_snippet=self.prompt_snippet,
             prompt_guidelines=self.prompt_guidelines,
         )
@@ -215,7 +219,7 @@ def create_read_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinit
             "required": ["path"],
         },
         executor=execute,
-        requires_approval=True,
+        requires_approval=False,
     )
 
 
@@ -366,6 +370,206 @@ def create_edit_tool(*, cwd: str | Path | None = None) -> AgentTool:
     return create_edit_tool_definition(cwd=cwd).to_agent_tool()
 
 
+# ---------------------------------------------------------------------------
+# Bash command safety classifier for auto-approval
+# ---------------------------------------------------------------------------
+
+_READ_ONLY_COMMANDS: frozenset[str] = frozenset({
+    # File inspection
+    "ls", "dir", "cat", "head", "tail", "more", "less", "zcat", "zless",
+    "nl", "od", "hexdump", "xxd", "strings",
+    # Search / discovery
+    "grep", "egrep", "fgrep", "rg", "ag", "ack",
+    "find", "locate", "which", "whereis", "whence", "type",
+    # Metadata / counting
+    "wc", "stat", "file", "du", "df",
+    # Output-only
+    "echo", "printf", "pwd", "whoami", "who", "id", "groups",
+    "date", "cal", "uptime", "hostname", "uname", "arch",
+    "env", "printenv", "locale",
+    # Process inspection
+    "ps", "pgrep", "pidof", "pstree", "top", "htop",
+    # Text processing (read-only)
+    "sort", "uniq", "cut", "paste", "join", "tr",
+    "expand", "unexpand",
+    # Comparison
+    "diff", "cmp", "comm", "sdiff",
+    # Help / documentation
+    "man", "info", "whatis", "apropos", "help",
+    # Path utilities
+    "tree", "realpath", "readlink", "dirname", "basename",
+})
+
+_READ_ONLY_GIT_SUBCOMMANDS: frozenset[str] = frozenset({
+    "log", "show", "diff", "status", "blame",
+    "rev-parse", "rev-list", "ls-files", "ls-tree", "describe",
+    "branch", "tag", "remote", "stash", "config",
+    "shortlog", "whatchanged", "reflog",
+})
+
+_READ_ONLY_DOCKER_SUBCOMMANDS: frozenset[str] = frozenset({
+    "ps", "images", "inspect", "logs", "stats",
+    "version", "info", "history", "top",
+})
+
+_READ_ONLY_KUBECTL_SUBCOMMANDS: frozenset[str] = frozenset({
+    "get", "describe", "logs", "explain", "top",
+    "api-resources", "api-versions", "cluster-info",
+    "config view", "version", "auth can-i",
+})
+
+_DESTRUCTIVE_PATTERNS: tuple[str, ...] = (
+    ">", ">>", "| tee ", "|tee ",
+)
+
+_MULTI_COMMAND_GIT = frozenset({
+    "branch", "tag", "remote", "stash", "config",
+})
+
+_MULTI_READ_ONLY_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "pip": frozenset({"list", "show", "freeze", "config", "cache list"}),
+    "pip3": frozenset({"list", "show", "freeze", "config", "cache list"}),
+    "npm": frozenset({"list", "view", "outdated", "ls", "info", "config list"}),
+    "yarn": frozenset({"list", "info", "config", "why"}),
+    "pnpm": frozenset({"list", "view", "outdated"}),
+    "cargo": frozenset({"check", "doc", "tree", "metadata", "readme"}),
+    "go": frozenset({"version", "env", "doc", "list", "mod why", "mod graph"}),
+    "python": frozenset({"-V", "--version", "-c"}),
+    "python3": frozenset({"-V", "--version", "-c"}),
+    "node": frozenset({"-v", "--version", "-e", "-p"}),
+    "rustc": frozenset({"-V", "--version"}),
+    "docker": _READ_ONLY_DOCKER_SUBCOMMANDS,
+    "kubectl": _READ_ONLY_KUBECTL_SUBCOMMANDS,
+}
+
+
+def _bash_command_is_read_only(arguments: Mapping[str, JSONValue]) -> bool:
+    """Return True when *arguments* describe a read-only shell invocation.
+
+    The classifier is a user-facing convenience, not a security boundary:
+    it errs on the side of requiring approval for unrecognised commands.
+    """
+    raw = arguments.get("command")
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    command = raw.strip()
+
+    # Output redirection or tee → may write to the filesystem.
+    for pattern in _DESTRUCTIVE_PATTERNS:
+        if pattern in command:
+            return False
+
+    # Break on the first shell metacharacter to isolate the command word.
+    main = _first_command_word(command)
+    if not main:
+        return False
+
+    # Always-read-only commands.
+    if main in _READ_ONLY_COMMANDS:
+        return True
+
+    # Dual-use commands with subcommand awareness.
+    subcommand = _first_subcommand(command, main)
+
+    if main == "git":
+        if subcommand is None:
+            return True  # plain "git" is read-only
+        if subcommand in _READ_ONLY_GIT_SUBCOMMANDS:
+            if subcommand in _MULTI_COMMAND_GIT:
+                subsub = _first_subcommand(command, subcommand)
+                if subcommand == "branch":
+                    return subsub in {None, "-r", "-a", "-l", "--list", "--remote", "--all"}
+                if subcommand in {"tag", "stash"}:
+                    return subsub in {None, "-l", "--list"} or (
+                        subcommand == "stash" and subsub == "list"
+                    )
+                if subcommand == "remote":
+                    return subsub in {None, "-v", "--verbose", "show"}
+                if subcommand == "config":
+                    return subsub in {None, "--list", "--get", "--get-regexp", "-l",
+                                      "--global", "--local", "--system"}
+            return True
+        return False
+
+    if main in _MULTI_READ_ONLY_SUBCOMMANDS:
+        allowed = _MULTI_READ_ONLY_SUBCOMMANDS[main]
+        if not allowed:
+            return False
+        if subcommand is None:
+            # Commands like "cargo" with no subcommand are safe.
+            return True
+        # Allow flag-style subcommands (-V, --version, -c for python, -e for node).
+        for sc in allowed:
+            if subcommand == sc or subcommand.startswith(f"{sc} "):
+                return True
+            if sc.startswith("-") and subcommand.startswith(sc):
+                return True
+        return False
+
+    return False
+
+
+def _first_command_word(command: str) -> str | None:
+    """Return the first shell word in *command*, skipping env assignments."""
+    tokens = _shell_split(command)
+    if not tokens:
+        return None
+    word = tokens[0]
+    # Skip leading VAR=value assignments.
+    while "=" in word and word.partition("=")[0].isidentifier():
+        tokens.pop(0)
+        word = tokens[0] if tokens else ""
+    if not word:
+        return None
+    # Skip common no-op wrappers only when followed by another word.
+    while word in {"command", "exec", "builtin", "env", "nice", "nohup", "time"}:
+        if len(tokens) <= 1:
+            break
+        tokens.pop(0)
+        word = tokens[0] if tokens else ""
+    return word or None
+
+
+def _first_subcommand(command: str, main: str) -> str | None:
+    """Return the first argument after *main* that isn't a flag."""
+    parts = command.split()
+    try:
+        idx = parts.index(main)
+    except ValueError:
+        return None
+    for token in parts[idx + 1 :]:
+        if not token.startswith("-"):
+            return token
+    return None
+
+
+def _shell_split(command: str) -> list[str]:
+    """Split *command* on unquoted whitespace (approximate, fast)."""
+    tokens: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == quote:
+                quote = None
+            else:
+                current.append(ch)
+        elif ch in {"'", '"'}:
+            quote = ch
+        elif ch in {" ", "\t"}:
+            if current:
+                tokens.append("".join(current))
+                current = []
+        else:
+            current.append(ch)
+        i += 1
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
 def create_bash_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinition:
     """Create the local asynchronous ``bash`` tool."""
     root = Path.cwd() if cwd is None else Path(cwd)
@@ -482,6 +686,7 @@ def create_bash_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinit
         },
         executor=execute,
         requires_approval=True,
+        auto_approve_if=_bash_command_is_read_only,
     )
 
 

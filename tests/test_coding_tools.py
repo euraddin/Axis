@@ -439,7 +439,9 @@ def test_create_coding_tools_returns_stable_default_order(tmp_path: Path) -> Non
     tools = create_coding_tools(cwd=tmp_path)
 
     assert [tool.name for tool in tools] == ["read", "write", "edit", "bash"]
-    assert all(tool.requires_approval for tool in tools)
+    assert [tool.requires_approval for tool in tools] == [False, True, True, True]
+    assert tools[0].auto_approve_if is None  # read is unconditionally read-only
+    assert tools[3].auto_approve_if is not None  # bash uses a classifier
 
 
 def test_bash_definition_exposes_optional_numeric_timeout(tmp_path: Path) -> None:

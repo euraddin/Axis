@@ -9,7 +9,7 @@ import pytest
 from rich.console import Console
 from textual.geometry import Offset
 from textual.selection import SELECT_ALL, Selection
-from textual.widgets import Footer, Input, ListView, Static, TextArea
+from textual.widgets import Button, Footer, Input, ListView, Static, TextArea
 
 import axis_coding.tui.app as tui_app
 from axis_agent import (
@@ -48,12 +48,15 @@ from axis_coding import (
     ModelChoice,
     ProjectContextFile,
     ProviderSettings,
+    RequestContextBreakdown,
+    RequestContextPart,
     ScopedModelConfig,
     SessionManager,
     TerminalCommandResult,
     builtin_provider_entry,
     load_provider_settings,
 )
+from axis_coding.credentials import credentials_path
 from axis_coding.prompt_templates import PromptTemplate
 from axis_coding.skills import Skill
 from axis_coding.tui import (
@@ -73,11 +76,18 @@ from axis_coding.tui import (
     TranscriptMessageWidget,
     TranscriptView,
     TreePickerScreen,
+    VoiceSetupScreen,
     render_compact_session_info,
     render_request_context_usage,
     render_session_sidebar,
 )
 from axis_coding.tui.config import TuiKeybindings, TuiSettings
+from axis_coding.voice import (
+    AudioInputDevice,
+    VoiceInputEvent,
+    load_voice_config,
+)
+from axis_coding.voice.config import VOLCENGINE_ASR_CREDENTIAL_NAME
 
 
 async def wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> None:
@@ -231,6 +241,51 @@ class CancellableSession:
         )
 
 
+class FakeVoiceController:
+    def __init__(self, listener: Callable[[VoiceInputEvent], None]) -> None:
+        self.listener = listener
+        self.state = "idle"
+        self.closed = False
+        self.context: Callable[[], object] | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.state in {"connecting", "recording", "finalizing", "polishing"}
+
+    async def start(self, context_provider: Callable[[], object]) -> None:
+        self.state = "connecting"
+        self.listener(VoiceInputEvent("connecting"))
+        self.context = context_provider
+        self.state = "recording"
+        self.listener(VoiceInputEvent("recording"))
+
+    async def stop(self) -> None:
+        self.state = "finalizing"
+        self.listener(VoiceInputEvent("finalizing"))
+        assert self.context is not None
+        self.context()
+        self.state = "polishing"
+        self.listener(VoiceInputEvent("polishing"))
+        self.state = "completed"
+        self.listener(
+            VoiceInputEvent(
+                "completed",
+                text=" spoken ",
+                raw_text="raw",
+                breakdown=RequestContextBreakdown(
+                    "Voice polish", (RequestContextPart("raw ASR", 2),)
+                ),
+            )
+        )
+
+    async def cancel(self) -> None:
+        self.state = "cancelled"
+        self.listener(VoiceInputEvent("cancelled", message="cancelled"))
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 def test_session_sidebar_and_compact_info_render_axis_session_facts(
     tmp_path: Path,
 ) -> None:
@@ -307,6 +362,16 @@ def test_request_context_usage_renders_token_ratios() -> None:
     assert rendered.plain == (
         "request 2 estimate · total ≈1,000 tokens · "
         "system 40.0% (400) · messages 35.0% (350) · tools 25.0% (250)"
+    )
+
+    voice = render_request_context_usage(
+        RequestContextBreakdown(
+            "Voice polish",
+            (RequestContextPart("raw ASR", 25), RequestContextPart("session", 75)),
+        )
+    )
+    assert voice.plain == (
+        "voice polish estimate · total ≈100 tokens · raw ASR 25.0% (25) · session 75.0% (75)"
     )
 
 
@@ -446,6 +511,7 @@ def test_tui_footer_hints_follow_normal_completion_and_running_modes(
                 "Thinking": "shift+tab",
                 "Model": "ctrl+p",
                 "Cancel": "escape",
+                "Voice": "f2",
             }
 
             prompt = app.query_one("#prompt", PromptInput)
@@ -456,6 +522,7 @@ def test_tui_footer_hints_follow_normal_completion_and_running_modes(
                 "Choose": "Up/Down",
                 "Complete": "Tab/Enter",
                 "Close": "escape",
+                "Voice": "f2",
             }
 
             prompt.value = ""
@@ -469,6 +536,7 @@ def test_tui_footer_hints_follow_normal_completion_and_running_modes(
                 "Cancel": "escape",
                 "Thinking": "ctrl+t",
                 "Tools": "ctrl+o",
+                "Voice": "f2",
             }
 
     asyncio.run(scenario())
@@ -521,6 +589,111 @@ def test_tui_app_maps_omni_palette_and_registers_picker_option(tmp_path: Path) -
     assert variables["axis-accent"] == "#FF79C6"
     assert variables["axis-markdown-inline-code"] == "#67E480"
     assert ThemePickerScreen("omni").theme_names[-1] == "omni"
+
+
+def test_f2_voice_inserts_polished_draft_at_frozen_cursor(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        controllers: list[FakeVoiceController] = []
+
+        def factory(listener: Callable[[VoiceInputEvent], None]) -> FakeVoiceController:
+            controller = FakeVoiceController(listener)
+            controllers.append(controller)
+            return controller
+
+        session = CancellableSession(tmp_path)
+        app = AxisTuiApp(
+            session,
+            paths=AxisPaths(home=tmp_path / ".axis"),
+            voice_controller_factory=factory,  # type: ignore[arg-type]
+        )
+        async with app.run_test(size=(120, 30)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.text = "before after"
+            prompt.cursor_position = 6
+
+            await pilot.press("f2")
+            await wait_until(lambda: bool(controllers) and controllers[0].state == "recording")
+            assert prompt.disabled is True
+            assert prompt.text == "before after"
+            assert "Recording" in str(app.query_one("#voice-status", Static).render())
+
+            controllers[0].listener(VoiceInputEvent("partial", text="temporary words"))
+            await pilot.pause()
+            assert prompt.text == "before after"
+
+            await pilot.press("f2")
+            await wait_until(lambda: prompt.disabled is False)
+            assert prompt.text == "before spoken  after"
+            assert session.messages == ()
+            usage = app.query_one("#request-context-usage", Static)
+            assert "voice polish estimate" in str(usage.render()).lower()
+            assert controllers[0].closed is True
+
+    asyncio.run(scenario())
+
+
+def test_escape_cancels_voice_before_running_agent(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        controllers: list[FakeVoiceController] = []
+
+        def factory(listener: Callable[[VoiceInputEvent], None]) -> FakeVoiceController:
+            controller = FakeVoiceController(listener)
+            controllers.append(controller)
+            return controller
+
+        session = CancellableSession(tmp_path)
+        session._running = True
+        app = AxisTuiApp(session, voice_controller_factory=factory)  # type: ignore[arg-type]
+        async with app.run_test(size=(100, 25)) as pilot:
+            await pilot.press("f2")
+            await wait_until(lambda: bool(controllers) and controllers[0].state == "recording")
+            await pilot.press("escape")
+            await wait_until(lambda: controllers[0].state == "cancelled")
+            assert session.cancel_called is False
+            assert app.query_one("#prompt", PromptInput).disabled is False
+
+    asyncio.run(scenario())
+
+
+def test_voice_setup_masks_tests_and_saves_separate_credential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_test(config: object, api_key: str, *, listener: object = None) -> str:
+        del config, listener
+        assert api_key == "volc-key"
+        return "测试成功"
+
+    monkeypatch.setattr(
+        tui_app,
+        "list_audio_input_devices",
+        lambda: (AudioInputDevice(4, "Studio Mic", 1, True),),
+    )
+    monkeypatch.setattr(tui_app, "test_voice_configuration", fake_test)
+
+    async def scenario() -> None:
+        paths = AxisPaths(home=tmp_path / ".axis", agents_home=tmp_path / ".agents")
+        app = AxisTuiApp(CancellableSession(tmp_path), paths=paths)
+        async with app.run_test(size=(100, 32)) as pilot:
+            app._open_voice_setup()
+            await pilot.pause()
+            assert isinstance(app.screen, VoiceSetupScreen)
+            key = app.screen.query_one("#voice-api-key", Input)
+            assert key.password is True
+            key.value = "volc-key"
+            app.screen.query_one("#voice-device-list", ListView).index = 1
+            await pilot.pause()
+            app.screen.query_one("#voice-test", Button).press()
+            await wait_until(lambda: app.screen.query_one("#voice-save", Button).disabled is False)
+            app.screen.query_one("#voice-save", Button).press()
+            await pilot.pause()
+            assert load_voice_config(paths).input_device == 4
+            assert (
+                FileCredentialStore(credentials_path(paths)).get(VOLCENGINE_ASR_CREDENTIAL_NAME)
+                == "volc-key"
+            )
+
+    asyncio.run(scenario())
 
 
 def test_tui_submits_and_renders_streamed_thinking_and_markdown(tmp_path: Path) -> None:
@@ -1135,6 +1308,7 @@ def test_ctrl_k_opens_registry_backed_command_completion(tmp_path: Path) -> None
                 "/theme",
                 "/thinking",
                 "/tree",
+                "/voice",
             ]
 
             prompt.value = "/sta"

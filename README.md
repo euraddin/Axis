@@ -144,6 +144,45 @@ axis --model deepseek-v4-flash
 
 TUI 与 print mode 使用同一个 CodingSession、system prompt、工具和 JSONL 存储，不维护第二套 agent 逻辑。
 
+### 上下文感知语音输入
+
+TUI 支持“豆包 Seed ASR 2.0 实时转写 → DeepSeekV4pro 上下文润色 → 编辑器草稿”的语音管线。它不会自动提交，也不会保存音频或未提交的原始转写。
+
+首次使用，在 TUI 中运行：
+
+```text
+/voice setup
+```
+
+输入火山引擎 Seed ASR 2.0 API key，选择麦克风并完成 3 秒测试。密钥保存在权限受限的 `~/.axis/credentials.json`，非秘密设置保存在 `~/.axis/voice.json`。也可以只注入环境变量：
+
+```bash
+export VOLCENGINE_ASR_API_KEY="你的火山语音 API key"
+```
+
+日常操作：
+
+- F2 开始录音，再按 F2 停止并润色；
+- Escape 优先丢弃当前录音，不会误取消正在运行的 Agent；
+- 临时识别只显示在状态区，最终文本才插入冻结的光标或选区；
+- Agent 正在回答或执行工具时仍可录音，完成后由你决定用 Enter steering 还是 Alt+Enter follow-up；
+- DeepSeek 润色失败时保留原始 ASR 文本，并在 TUI 中明确警告；
+- `/voice` 查看当前设备、凭据和快捷键状态。
+
+默认快捷键可在 `~/.axis/tui.json` 中修改：
+
+```json
+{
+  "keybindings": {
+    "voice_record": "f2"
+  }
+}
+```
+
+润色只使用当前 active session 的有界快照：光标附近草稿、已有摘要、最近六条可见对话、cwd、Git branch、skill 名称和脱敏后的工具元数据。它不会读取 reasoning、完整工具输出、文件正文、diff、bash 命令或其他会话。每次润色后，TUI 会显示 rules、raw ASR、editor、session 和 coding metadata 的估算 token 比例。
+
+macOS 首次录音时，需要在“系统设置 → 隐私与安全性 → 麦克风”中允许当前终端访问麦克风。
+
 ## v1 验收
 
 ```bash

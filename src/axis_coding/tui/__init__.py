@@ -15,6 +15,8 @@ from axis_coding.tui.app import (
     TreePickerScreen,
     TreePickerSelection,
     TuiSession,
+    VoiceSetupResult,
+    VoiceSetupScreen,
     run_tui_app,
 )
 from axis_coding.tui.autocomplete import (
@@ -95,6 +97,8 @@ __all__ = [
     "TuiThemeName",
     "ThemePickerScreen",
     "ToolApprovalScreen",
+    "VoiceSetupResult",
+    "VoiceSetupScreen",
     "PromptInput",
     "SessionPickerScreen",
     "SessionSidebar",

@@ -60,6 +60,7 @@ def test_default_registry_only_advertises_implemented_commands() -> None:
 
     assert [command.name for command in commands] == [
         "compact",
+        "exit",
         "export",
         "hotkeys",
         "login",
@@ -76,7 +77,17 @@ def test_default_registry_only_advertises_implemented_commands() -> None:
         "theme",
         "thinking",
         "tree",
+        "voice",
     ]
+
+
+def test_voice_command_requests_status_or_setup() -> None:
+    registry = create_default_command_registry()
+    session = FakeCommandSession(Path("/repo"))
+
+    assert registry.execute(session, "/voice").voice_status_requested  # type: ignore[arg-type]
+    assert registry.execute(session, "/voice setup").voice_setup_requested  # type: ignore[arg-type]
+    assert registry.execute(session, "/voice nope").message == "Usage: /voice [setup]"  # type: ignore[arg-type]
 
 
 def test_registry_rejects_duplicate_names_and_aliases() -> None:
@@ -137,6 +148,7 @@ def test_quit_reload_and_theme_return_declarative_actions(tmp_path: Path) -> Non
     session = FakeCommandSession(tmp_path)
 
     assert registry.execute(session, "/quit").exit_requested is True  # type: ignore[arg-type]
+    assert registry.execute(session, "/exit").exit_requested is True  # type: ignore[arg-type]
     assert registry.execute(session, "/reload").reload_requested is True  # type: ignore[arg-type]
     assert registry.execute(session, "/reload now").message == "Usage: /reload"  # type: ignore[arg-type]
     assert registry.execute(session, "/theme").theme_picker_requested is True  # type: ignore[arg-type]

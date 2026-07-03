@@ -21,6 +21,38 @@ class ContextUsageEstimate:
     tool_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class RequestContextPart:
+    """One named component of an estimated provider request."""
+
+    name: str
+    estimated_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class RequestContextBreakdown:
+    """Provider-neutral named token estimate for one outbound request."""
+
+    kind: str
+    parts: tuple[RequestContextPart, ...]
+
+    @property
+    def total_tokens(self) -> int:
+        return sum(part.estimated_tokens for part in self.parts)
+
+
+def context_usage_breakdown(usage: ContextUsageEstimate) -> RequestContextBreakdown:
+    """Adapt the legacy agent estimate to the generic request representation."""
+    return RequestContextBreakdown(
+        kind="Agent",
+        parts=(
+            RequestContextPart("system", usage.system_tokens),
+            RequestContextPart("messages", usage.message_tokens),
+            RequestContextPart("tools", usage.tool_tokens),
+        ),
+    )
+
+
 def estimate_text_tokens(text: str) -> int:
     """Return a deliberately rough UTF-8-aware token estimate."""
     if not text:

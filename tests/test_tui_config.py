@@ -157,6 +157,7 @@ def test_tui_settings_serialization_contains_every_keybinding() -> None:
         "toggle_thinking",
         "toggle_tool_results",
         "copy_message",
+        "voice_record",
         "quit",
     }
 

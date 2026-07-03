@@ -319,6 +319,7 @@ async def run_deepseek_tui_mode(
             session,
             startup_message=startup_message,
             initial_prompt=initial_prompt,
+            paths=runtime_paths,
         )
     finally:
         if session is not None:

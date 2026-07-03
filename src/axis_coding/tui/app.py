@@ -1,9 +1,9 @@
 """Textual application for one Axis coding session."""
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Protocol, cast
@@ -33,6 +33,7 @@ from textual.worker import Worker
 from axis_agent import (
     AgentEndEvent,
     AgentEvent,
+    AgentMessage,
     ErrorEvent,
     MessageDeltaEvent,
     MessageEndEvent,
@@ -50,8 +51,9 @@ from axis_coding.commands import (
     create_default_command_registry,
     format_reload_summary,
 )
-from axis_coding.context_window import ContextUsageEstimate
+from axis_coding.context_window import ContextUsageEstimate, RequestContextBreakdown
 from axis_coding.credentials import FileCredentialStore, credentials_path
+from axis_coding.paths import AxisPaths
 from axis_coding.permissions import (
     SessionToolApprovalController,
     ToolApprovalPreview,
@@ -103,6 +105,20 @@ from axis_coding.tui.widgets import (
     render_completion_suggestions,
     render_request_context_usage,
 )
+from axis_coding.voice import (
+    AudioInputDevice,
+    VoiceContextSnapshot,
+    VoiceInputController,
+    VoiceInputEvent,
+    build_voice_context_snapshot,
+    create_voice_input_controller,
+    list_audio_input_devices,
+    load_voice_config,
+    resolve_voice_api_key,
+    save_voice_config,
+    test_voice_configuration,
+)
+from axis_coding.voice.config import VOLCENGINE_ASR_CREDENTIAL_NAME
 
 ACTIVITY_TICK_SECONDS = 0.15
 ACTIVITY_INDICATOR_HEIGHT = 3
@@ -131,6 +147,8 @@ class CompletionActionTarget(Protocol):
 
     def action_cancel_run(self) -> None: ...
 
+    def action_toggle_voice(self) -> None: ...
+
     def action_toggle_tool_results(self) -> None: ...
 
     def action_toggle_thinking(self) -> None: ...
@@ -158,6 +176,7 @@ class PromptInput(TextArea):
         self.shell_mode_style = ""
         self._base_bindings = self._bindings.copy()
         self._footer_mode: Literal["normal", "completion", "running"] = "normal"
+        self._voice_active = False
         self._apply_prompt_bindings()
 
     def set_footer_mode(self, mode: Literal["normal", "completion", "running"]) -> None:
@@ -171,9 +190,22 @@ class PromptInput(TextArea):
         self._bindings = BindingsMap.merge(
             [
                 self._base_bindings,
-                BindingsMap(_prompt_bindings(self.tui_keybindings, mode=self._footer_mode)),
+                BindingsMap(
+                    _prompt_bindings(
+                        self.tui_keybindings,
+                        mode=self._footer_mode,
+                        voice_active=self._voice_active,
+                    )
+                ),
             ]
         )
+
+    def set_voice_active(self, active: bool) -> None:
+        if active == self._voice_active:
+            return
+        self._voice_active = active
+        self._apply_prompt_bindings()
+        self.refresh_bindings()
 
     @property
     def value(self) -> str:
@@ -205,6 +237,10 @@ class PromptInput(TextArea):
             event.stop()
             event.prevent_default()
             await target.action_submit_prompt()
+        elif event.key == keybindings.voice_record:
+            event.stop()
+            event.prevent_default()
+            target.action_toggle_voice()
         elif event.key == keybindings.queue_follow_up:
             event.stop()
             event.prevent_default()
@@ -283,6 +319,9 @@ class PromptInput(TextArea):
 
     def action_cancel(self) -> None:
         cast(CompletionActionTarget, self.app).action_cancel_run()
+
+    def action_toggle_voice(self) -> None:
+        cast(CompletionActionTarget, self.app).action_toggle_voice()
 
     def action_open_command_palette(self) -> None:
         cast(CompletionActionTarget, self.app).action_open_command_palette()
@@ -782,6 +821,142 @@ class LoginScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+@dataclass(frozen=True, slots=True)
+class VoiceSetupResult:
+    """Validated values returned by the voice setup modal."""
+
+    api_key: str | None
+    input_device: int | str | None
+
+
+type VoiceSetupTester = Callable[[str, int | str | None, Callable[[str], None]], Awaitable[str]]
+type VoiceControllerFactory = Callable[[Callable[[VoiceInputEvent], None]], VoiceInputController]
+
+
+class VoiceSetupScreen(ModalScreen[VoiceSetupResult | None]):
+    """Collect a secret and microphone choice, then require a real ASR test."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(
+        self,
+        devices: Sequence[AudioInputDevice],
+        *,
+        has_existing_key: bool,
+        current_device: int | str | None,
+        tester: VoiceSetupTester,
+    ) -> None:
+        super().__init__()
+        self.devices = tuple(devices)
+        self.has_existing_key = has_existing_key
+        self.current_device = current_device
+        self.tester = tester
+        self.device_values: tuple[int | str | None, ...] = (
+            None,
+            *(device.index for device in self.devices),
+        )
+        self._test_succeeded = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="voice-setup"):
+            yield Static("Voice input setup", id="voice-setup-title")
+            key_help = (
+                "Leave blank to keep the configured Volcengine ASR key."
+                if self.has_existing_key
+                else "Paste a Volcengine Seed ASR 2.0 API key."
+            )
+            yield Static(key_help, id="voice-setup-help")
+            yield Input(placeholder="Volcengine ASR API key", password=True, id="voice-api-key")
+            yield Static("Microphone", classes="voice-setup-label")
+            yield ListView(
+                ListItem(Label("System default")),
+                *(
+                    ListItem(Label(f"{device.name}{' · default' if device.default else ''}"))
+                    for device in self.devices
+                ),
+                id="voice-device-list",
+            )
+            yield Static(
+                "Test records 3 seconds and sends it to Volcengine; nothing is saved.",
+                id="voice-test-status",
+                markup=False,
+            )
+            with Horizontal(id="voice-setup-actions"):
+                yield Button("Test 3 seconds", id="voice-test", variant="primary")
+                yield Button("Save", id="voice-save", variant="success", disabled=True)
+                yield Button("Cancel", id="voice-cancel")
+
+    def on_mount(self) -> None:
+        device_list = self.query_one("#voice-device-list", ListView)
+        try:
+            device_list.index = self.device_values.index(self.current_device)
+        except ValueError:
+            device_list.index = 0
+        self.query_one("#voice-api-key", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "voice-api-key":
+            self._invalidate_test()
+
+    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        if event.list_view.id == "voice-device-list":
+            self._invalidate_test()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "voice-test":
+            self.run_worker(
+                self._run_test(),
+                name="axis-voice-setup-test",
+                group="voice-setup",
+                exclusive=True,
+                exit_on_error=False,
+            )
+        elif event.button.id == "voice-save" and self._test_succeeded:
+            self.dismiss(
+                VoiceSetupResult(
+                    api_key=self.query_one("#voice-api-key", Input).value.strip() or None,
+                    input_device=self._selected_device(),
+                )
+            )
+        elif event.button.id == "voice-cancel":
+            self.dismiss(None)
+
+    async def _run_test(self) -> None:
+        key = self.query_one("#voice-api-key", Input).value.strip()
+        if not key and not self.has_existing_key:
+            self.query_one("#voice-test-status", Static).update("Enter an ASR API key first.")
+            return
+        test_button = self.query_one("#voice-test", Button)
+        save_button = self.query_one("#voice-save", Button)
+        test_button.disabled = True
+        save_button.disabled = True
+        status = self.query_one("#voice-test-status", Static)
+        status.update("Connecting, then recording for 3 seconds…")
+        try:
+            transcript = await self.tester(key, self._selected_device(), status.update)
+        except Exception as exc:
+            self._test_succeeded = False
+            status.update(f"Test failed: {exc}")
+        else:
+            self._test_succeeded = True
+            status.update(f"Test succeeded: {transcript}")
+            save_button.disabled = False
+        finally:
+            test_button.disabled = False
+
+    def _selected_device(self) -> int | str | None:
+        index = self.query_one("#voice-device-list", ListView).index
+        return self.device_values[index] if index is not None else None
+
+    def _invalidate_test(self) -> None:
+        self._test_succeeded = False
+        with suppress(NoMatches):
+            self.query_one("#voice-save", Button).disabled = True
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class SessionPickerScreen(ModalScreen[str | None]):
     """Select one indexed session for the current working directory."""
 
@@ -1122,16 +1297,24 @@ class AxisTuiApp(App[None]):
         color: $axis-muted-text;
     }
 
+    #voice-status {
+        height: auto;
+        max-height: 4;
+        margin: 0 1 1 1;
+        padding: 0 1;
+        color: $axis-accent;
+    }
+
     CommandOutputScreen, ThemePickerScreen, SessionPickerScreen, TreePickerScreen,
     BranchSummaryInstructionsScreen, ModelPickerScreen, LoginProviderPickerScreen,
-    LoginScreen, ToolApprovalScreen {
+    LoginScreen, ToolApprovalScreen, VoiceSetupScreen {
         align: center middle;
         background: $axis-screen-background 70%;
     }
 
     #command-output, #theme-picker, #session-picker, #tree-picker,
     #branch-summary-instructions, #model-picker, #login-provider-picker, #login-screen,
-    #tool-approval {
+    #tool-approval, #voice-setup {
         width: 76;
         max-width: 90%;
         height: auto;
@@ -1144,7 +1327,7 @@ class AxisTuiApp(App[None]):
 
     #command-output-title, #theme-picker-title, #session-picker-title, #tree-picker-title,
     #branch-summary-instructions-title, #model-picker-title, #login-provider-title,
-    #login-title, #tool-approval-title {
+    #login-title, #tool-approval-title, #voice-setup-title {
         height: 1;
         margin-bottom: 1;
         text-style: bold;
@@ -1164,7 +1347,7 @@ class AxisTuiApp(App[None]):
 
     #command-output-help, #theme-picker-help, #session-picker-help, #tree-picker-help,
     #branch-summary-instructions-help, #model-picker-help, #login-provider-help,
-    #login-footer, #tool-approval-help {
+    #login-footer, #tool-approval-help, #voice-setup-help {
         height: 1;
         margin-top: 1;
         color: $axis-muted-text;
@@ -1191,7 +1374,7 @@ class AxisTuiApp(App[None]):
     }
 
     #theme-picker-list, #session-picker-list, #tree-picker-list, #model-picker-list,
-    #login-provider-list {
+    #login-provider-list, #voice-device-list {
         height: auto;
         max-height: 10;
         background: $axis-transcript-background;
@@ -1209,11 +1392,32 @@ class AxisTuiApp(App[None]):
         margin-bottom: 1;
     }
 
-    #model-picker-search, #login-api-key {
+    #model-picker-search, #login-api-key, #voice-api-key {
         margin-bottom: 1;
         border: tall $axis-border;
         background: $axis-transcript-background;
         color: $axis-screen-text;
+    }
+
+    #voice-device-list {
+        height: 8;
+        margin-bottom: 1;
+    }
+
+    #voice-test-status {
+        height: auto;
+        min-height: 2;
+        color: $axis-muted-text;
+        margin-bottom: 1;
+    }
+
+    #voice-setup-actions {
+        height: 3;
+        align-horizontal: center;
+    }
+
+    #voice-setup-actions Button {
+        margin: 0 1;
     }
 
     ListView > ListItem.--highlight {
@@ -1229,10 +1433,19 @@ class AxisTuiApp(App[None]):
         tui_settings: TuiSettings | None = None,
         startup_message: str | None = None,
         initial_prompt: str | None = None,
+        paths: AxisPaths | None = None,
+        voice_controller_factory: VoiceControllerFactory | None = None,
     ) -> None:
         self.tui_settings = tui_settings or TuiSettings()
         self.startup_message = startup_message
         self.initial_prompt = initial_prompt
+        self.paths = paths or AxisPaths()
+        self._voice_controller_factory = voice_controller_factory or (
+            lambda listener: create_voice_input_controller(
+                paths=self.paths,
+                listener=listener,
+            )
+        )
         super().__init__()
         self._bindings = BindingsMap(_app_bindings(self.tui_settings.keybindings))
         self.session = session
@@ -1250,8 +1463,13 @@ class AxisTuiApp(App[None]):
         self._terminal_active = False
         self._compaction_worker: Worker[None] | None = None
         self._prompt_worker: Worker[None] | None = None
-        self._request_context_usage: ContextUsageEstimate | None = None
+        self._request_context_usage: ContextUsageEstimate | RequestContextBreakdown | None = None
         self._request_context_turn: int | None = None
+        self._voice_controller: VoiceInputController | None = None
+        self._voice_anchor: tuple[tuple[int, int], tuple[int, int]] | None = None
+        self._voice_editor_text = ""
+        self._voice_editor_cursor = 0
+        self._voice_worker: Worker[None] | None = None
         self._tool_approval_controller = SessionToolApprovalController(self._show_tool_approval)
         set_approval_handler = getattr(session, "set_tool_approval_handler", None)
         if callable(set_approval_handler):
@@ -1281,6 +1499,7 @@ class AxisTuiApp(App[None]):
                     )
                 yield CompactSessionInfo(id="compact-session-info")
                 yield Static(id="request-context-usage")
+                yield Static(id="voice-status")
                 yield Static(id="autocomplete")
         yield Footer()
 
@@ -1327,6 +1546,8 @@ class AxisTuiApp(App[None]):
             self._activity_timer = None
         if self.session.is_running:
             self.session.cancel()
+        if self._voice_controller is not None and self._voice_controller.active:
+            asyncio.create_task(self._voice_controller.cancel())
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Recompute pure suggestions whenever prompt content changes."""
@@ -1507,6 +1728,10 @@ class AxisTuiApp(App[None]):
             self._set_tui_theme(cast(TuiThemeName, command.theme))
         if command.theme_picker_requested:
             self._open_theme_picker()
+        if command.voice_status_requested:
+            self._show_command_message("/voice", self._voice_status_message())
+        if command.voice_setup_requested:
+            self._open_voice_setup()
         if message:
             if _command_name(text) == "reload":
                 self.state.add_item("status", f"/reload\n{message}")
@@ -1903,6 +2128,90 @@ class AxisTuiApp(App[None]):
         paths = getattr(resources, "paths", None)
         return FileCredentialStore(credentials_path(paths))
 
+    def _open_voice_setup(self) -> None:
+        if self.session.is_running or self.state.running:
+            self._notify(
+                "Wait for the active Agent operation before voice setup.", severity="warning"
+            )
+            return
+        try:
+            config = load_voice_config(self.paths)
+            devices = list_audio_input_devices()
+            has_key = resolve_voice_api_key(self.paths) is not None
+        except Exception as exc:
+            self._notify(f"Could not open voice setup: {exc}", severity="error")
+            return
+        self.push_screen(
+            VoiceSetupScreen(
+                devices,
+                has_existing_key=has_key,
+                current_device=config.input_device,
+                tester=self._test_voice_setup,
+            ),
+            callback=self._handle_voice_setup_result,
+        )
+
+    async def _test_voice_setup(
+        self,
+        api_key: str,
+        input_device: int | str | None,
+        update: Callable[[str], None],
+    ) -> str:
+        key = api_key or resolve_voice_api_key(self.paths)
+        if not key:
+            raise RuntimeError("Enter a Volcengine ASR API key")
+        config = replace(load_voice_config(self.paths), input_device=input_device)
+
+        def listener(event: VoiceInputEvent) -> None:
+            if event.type == "partial" and event.text:
+                update(f"Listening: {event.text}")
+
+        return await test_voice_configuration(config, key, listener=listener)
+
+    def _handle_voice_setup_result(self, result: VoiceSetupResult | None) -> None:
+        if result is None:
+            return
+        try:
+            if result.api_key is not None:
+                FileCredentialStore(credentials_path(self.paths)).set(
+                    VOLCENGINE_ASR_CREDENTIAL_NAME,
+                    result.api_key,
+                )
+            config = replace(
+                load_voice_config(self.paths),
+                input_device=result.input_device,
+            )
+            save_voice_config(config, self.paths)
+        except Exception as exc:
+            self._notify(f"Could not save voice setup: {exc}", severity="error")
+            return
+        self._notify("Voice input configured. Press F2 to start recording.")
+
+    def _voice_status_message(self) -> str:
+        try:
+            config = load_voice_config(self.paths)
+            configured = resolve_voice_api_key(self.paths) is not None
+            devices = list_audio_input_devices()
+        except Exception as exc:
+            return f"Voice input status could not be loaded: {exc}"
+        selected = "system default" if config.input_device is None else str(config.input_device)
+        selected_device = next(
+            (device.name for device in devices if device.index == config.input_device),
+            selected,
+        )
+        return "\n".join(
+            (
+                "Context-aware voice input",
+                f"- ASR: Volcengine Seed ASR 2.0 ({config.language})",
+                f"- Credentials: {'configured' if configured else 'missing'}",
+                f"- Microphone: {selected_device}",
+                f"- Maximum recording: {config.max_recording_seconds:g} seconds",
+                f"- Shortcut: {self.tui_settings.keybindings.voice_record}",
+                "- Setup: /voice setup",
+                "- Audio and raw transcripts are not persisted.",
+            )
+        )
+
     def _open_login_picker(self) -> None:
         self.push_screen(
             LoginProviderPickerScreen(BUILTIN_PROVIDER_CATALOG),
@@ -2057,8 +2366,167 @@ class AxisTuiApp(App[None]):
             prompt.cursor_position = len(result.input_prefill)
         self._notify(result.message)
 
+    def action_toggle_voice(self) -> None:
+        """Start recording or stop the active recording for finalization."""
+        controller = self._voice_controller
+        if controller is not None and controller.active:
+            if controller.state == "recording":
+                self._voice_worker = self.run_worker(
+                    self._stop_voice(controller),
+                    name="axis-voice-stop",
+                    group="voice",
+                    exclusive=False,
+                    exit_on_error=False,
+                )
+            return
+        if isinstance(self.screen, ModalScreen):
+            self._notify("Close the active dialog before starting voice input.", severity="warning")
+            return
+        prompt = self.query_one("#prompt", PromptInput)
+        if prompt.disabled:
+            self._notify(
+                "Wait for the active editor operation before recording.", severity="warning"
+            )
+            return
+        try:
+            controller = self._voice_controller_factory(self._queue_voice_event)
+        except Exception as exc:
+            self._notify(str(exc), severity="error")
+            return
+        self._voice_controller = controller
+        self._voice_anchor = (prompt.selection.start, prompt.selection.end)
+        self._voice_editor_text = prompt.text
+        self._voice_editor_cursor = prompt.cursor_position
+        prompt.disabled = True
+        prompt.set_voice_active(True)
+        self._set_app_voice_binding(True)
+        self._set_voice_status("Connecting to Volcengine ASR…")
+        self._voice_worker = self.run_worker(
+            self._start_voice(controller),
+            name="axis-voice-start",
+            group="voice",
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _start_voice(self, controller: VoiceInputController) -> None:
+        await controller.start(self._build_voice_context)
+
+    async def _stop_voice(self, controller: VoiceInputController) -> None:
+        await controller.stop()
+
+    async def _cancel_voice(self) -> None:
+        controller = self._voice_controller
+        if controller is None:
+            return
+        await controller.cancel()
+
+    async def _dispose_voice(self, controller: VoiceInputController) -> None:
+        await controller.aclose()
+        if self._voice_controller is controller:
+            self._voice_controller = None
+            self._voice_worker = None
+
+    def _build_voice_context(self) -> VoiceContextSnapshot:
+        messages = cast(Sequence[AgentMessage], tuple(getattr(self.session, "messages", ())))
+        skills = tuple(getattr(self.session, "skills", ()))
+        return build_voice_context_snapshot(
+            messages=messages,
+            editor_text=self._voice_editor_text,
+            cursor=self._voice_editor_cursor,
+            cwd=self.session.cwd,
+            session_title=cast(str | None, getattr(self.session, "session_title", None)),
+            skill_names=tuple(
+                str(name) for skill in skills if (name := getattr(skill, "name", None))
+            ),
+        )
+
+    def _handle_voice_event(self, event: VoiceInputEvent) -> None:
+        if event.type == "connecting":
+            self._set_voice_status("Connecting to Volcengine ASR…")
+        elif event.type == "recording":
+            self._set_voice_status("● Recording · F2 finishes · Escape discards")
+        elif event.type == "partial":
+            if event.message:
+                self._notify(event.message, severity="warning")
+            self._set_voice_status(f"● Recording · {event.text}" if event.text else event.message)
+        elif event.type == "finalizing":
+            self._set_voice_status("Finalizing speech recognition…")
+        elif event.type == "polishing":
+            self._set_voice_status("Polishing with DeepSeekV4pro…")
+        elif event.type == "completed":
+            prompt = self.query_one("#prompt", PromptInput)
+            start, end = self._voice_anchor or (prompt.cursor_location, prompt.cursor_location)
+            prompt.replace(event.text, start, end)
+            self._unlock_voice_prompt()
+            if event.breakdown is not None:
+                self._request_context_usage = event.breakdown
+                self._request_context_turn = None
+            if event.used_fallback:
+                self._notify(
+                    "DeepSeek polishing failed; inserted the raw ASR transcript.",
+                    severity="warning",
+                )
+            self._set_voice_status("")
+            self._render_state()
+            self._schedule_voice_disposal()
+        elif event.type == "error":
+            self._unlock_voice_prompt()
+            self._set_voice_status("")
+            self._notify(f"Voice input failed: {event.message}", severity="error")
+            self._schedule_voice_disposal()
+        elif event.type == "cancelled":
+            self._unlock_voice_prompt()
+            self._set_voice_status("")
+            self._notify("Voice input cancelled.")
+            self._schedule_voice_disposal()
+
+    def _queue_voice_event(self, event: VoiceInputEvent) -> None:
+        self.call_later(self._handle_voice_event, event)
+
+    def _unlock_voice_prompt(self) -> None:
+        with suppress(NoMatches):
+            prompt = self.query_one("#prompt", PromptInput)
+            prompt.disabled = False
+            prompt.set_voice_active(False)
+            prompt.focus()
+        self._set_app_voice_binding(False)
+        self._voice_anchor = None
+
+    def _set_voice_status(self, text: str) -> None:
+        with suppress(NoMatches):
+            status = self.query_one("#voice-status", Static)
+            status.display = bool(text)
+            status.update(text)
+
+    def _set_app_voice_binding(self, active: bool) -> None:
+        self._bindings = BindingsMap(
+            _app_bindings(self.tui_settings.keybindings, voice_active=active)
+        )
+        self.refresh_bindings()
+
+    def _schedule_voice_disposal(self) -> None:
+        controller = self._voice_controller
+        if controller is not None:
+            self.run_worker(
+                self._dispose_voice(controller),
+                name="axis-voice-dispose",
+                group="voice-dispose",
+                exclusive=True,
+                exit_on_error=False,
+            )
+
     def action_cancel_run(self) -> None:
         """Request cooperative cancellation without killing the UI worker."""
+        if self._voice_controller is not None and self._voice_controller.active:
+            self.run_worker(
+                self._cancel_voice(),
+                name="axis-voice-cancel",
+                group="voice",
+                exclusive=True,
+                exit_on_error=False,
+            )
+            return
         if self._is_compaction_active():
             worker = self._compaction_worker
             if worker is not None:
@@ -2078,6 +2546,8 @@ class AxisTuiApp(App[None]):
 
     def action_exit_app(self) -> None:
         """Cancel active work and exit the application."""
+        if self._voice_controller is not None and self._voice_controller.active:
+            asyncio.create_task(self._voice_controller.cancel())
         if self.session.is_running or self.state.running:
             self.session.cancel()
         self.exit()
@@ -2186,10 +2656,8 @@ class AxisTuiApp(App[None]):
             theme=self.tui_settings.resolved_theme,
         )
         request_usage = self.query_one("#request-context-usage", Static)
-        request_usage.display = (
-            self._request_context_usage is not None and self._request_context_turn is not None
-        )
-        if self._request_context_usage is not None and self._request_context_turn is not None:
+        request_usage.display = self._request_context_usage is not None
+        if self._request_context_usage is not None:
             request_usage.update(
                 render_request_context_usage(
                     self._request_context_usage,
@@ -2354,6 +2822,7 @@ async def run_tui_app(
     tui_settings: TuiSettings | None = None,
     startup_message: str | None = None,
     initial_prompt: str | None = None,
+    paths: AxisPaths | None = None,
 ) -> None:
     """Run the basic Axis TUI in the caller's current async loop."""
     await AxisTuiApp(
@@ -2361,6 +2830,7 @@ async def run_tui_app(
         tui_settings=tui_settings if tui_settings is not None else load_tui_settings(),
         startup_message=startup_message,
         initial_prompt=initial_prompt,
+        paths=paths,
     ).run_async()
 
 
@@ -2383,6 +2853,7 @@ def _prompt_bindings(
     keybindings: TuiKeybindings,
     *,
     mode: Literal["normal", "completion", "running"],
+    voice_active: bool = False,
 ) -> list[Binding]:
     if mode == "completion":
         visible = [
@@ -2404,6 +2875,12 @@ def _prompt_bindings(
                 priority=True,
             ),
             Binding(keybindings.cancel, "cancel", "Close", priority=True),
+            Binding(
+                keybindings.voice_record,
+                "toggle_voice",
+                "Stop voice" if voice_active else "Voice",
+                priority=True,
+            ),
         ]
         return [*visible, *_hidden_prompt_bindings(keybindings, visible)]
     if mode == "running":
@@ -2428,11 +2905,23 @@ def _prompt_bindings(
                 "Tools",
                 priority=True,
             ),
+            Binding(
+                keybindings.voice_record,
+                "toggle_voice",
+                "Stop voice" if voice_active else "Voice",
+                priority=True,
+            ),
         ]
         return [*visible, *_hidden_prompt_bindings(keybindings, visible)]
     visible = [
         Binding("enter", "submit_prompt", "Submit", priority=True),
         Binding("shift+enter", "insert_newline", "Newline", priority=True),
+        Binding(
+            keybindings.voice_record,
+            "toggle_voice",
+            "Stop voice" if voice_active else "Voice",
+            priority=True,
+        ),
         Binding(
             keybindings.command_palette,
             "open_command_palette",
@@ -2467,6 +2956,7 @@ def _hidden_prompt_bindings(
         (keybindings.toggle_tool_results, "toggle_tool_results"),
         (keybindings.toggle_thinking, "toggle_thinking"),
         (keybindings.copy_message, "clear_prompt"),
+        (keybindings.voice_record, "toggle_voice"),
         (keybindings.accept_completion, "accept_completion"),
         (keybindings.completion_next, "completion_next"),
         (keybindings.completion_previous, "completion_previous"),
@@ -2479,10 +2969,20 @@ def _hidden_prompt_bindings(
     ]
 
 
-def _app_bindings(keybindings: TuiKeybindings) -> list[Binding]:
+def _app_bindings(
+    keybindings: TuiKeybindings,
+    *,
+    voice_active: bool = False,
+) -> list[Binding]:
     """Bind only actions implemented by the current incremental frontend."""
     return [
         Binding(keybindings.cancel, "cancel_run", "Cancel", priority=True),
+        Binding(
+            keybindings.voice_record,
+            "toggle_voice",
+            "Stop voice" if voice_active else "Voice",
+            priority=True,
+        ),
         Binding(
             keybindings.command_palette,
             "open_command_palette",

@@ -207,6 +207,20 @@ def _drain_queued_messages(
     return tuple(events)
 
 
+def _auto_approved(tool: AgentTool, tool_call: ToolCall) -> bool:
+    """Return True when *tool_call* is classified as safe enough to skip approval.
+
+    Failures inside the classifier are treated as *not approved* so the
+    call safely falls through to the normal approval path.
+    """
+    if tool.auto_approve_if is None:
+        return False
+    try:
+        return bool(tool.auto_approve_if(tool_call.arguments))
+    except Exception:
+        return False
+
+
 async def _execute_tool_calls(
     tool_calls: list[ToolCall],
     tool_by_name: Mapping[str, AgentTool],
@@ -229,23 +243,26 @@ async def _execute_tool_calls(
             result = _unknown_tool_result(tool_call)
         else:
             if tool.requires_approval:
-                yield ToolApprovalRequestEvent(tool_call=tool_call)
-                decision, reason = await _resolve_tool_approval(
-                    tool,
-                    tool_call,
-                    signal,
-                    request_tool_approval,
-                )
-                yield ToolApprovalResolvedEvent(
-                    tool_call_id=tool_call.id,
-                    decision=decision,
-                    reason=reason,
-                )
-                if decision == "deny":
-                    result = _denied_tool_result(tool_call, reason)
-                    messages.append(_tool_result_message(result))
-                    yield ToolExecutionEndEvent(result=result)
-                    continue
+                if _auto_approved(tool, tool_call):
+                    pass  # auto-approved: command is read-only
+                else:
+                    yield ToolApprovalRequestEvent(tool_call=tool_call)
+                    decision, reason = await _resolve_tool_approval(
+                        tool,
+                        tool_call,
+                        signal,
+                        request_tool_approval,
+                    )
+                    yield ToolApprovalResolvedEvent(
+                        tool_call_id=tool_call.id,
+                        decision=decision,
+                        reason=reason,
+                    )
+                    if decision == "deny":
+                        result = _denied_tool_result(tool_call, reason)
+                        messages.append(_tool_result_message(result))
+                        yield ToolExecutionEndEvent(result=result)
+                        continue
             yield ToolExecutionStartEvent(tool_call=tool_call)
             result = await _execute_tool(tool, tool_call, signal)
 

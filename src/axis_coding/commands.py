@@ -98,6 +98,8 @@ class CommandResult:
     logout_provider: str | None = None
     theme_picker_requested: bool = False
     theme: str | None = None
+    voice_setup_requested: bool = False
+    voice_status_requested: bool = False
     message: str | None = None
 
 
@@ -179,7 +181,10 @@ class CommandRegistry:
 def create_default_command_registry() -> CommandRegistry:
     """Create the commands whose behavior is implemented through TUI-7."""
     registry = CommandRegistry()
-    registry.register(SlashCommand("quit", "Exit the current session.", "/quit", _quit_command))
+    registry.register(SlashCommand("quit", "Exit Axis.", "/quit", _quit_command))
+    registry.register(
+        SlashCommand("exit", "Exit Axis.", "/exit", _quit_command, search_terms=("quit",))
+    )
     registry.register(
         SlashCommand(
             "new",
@@ -320,6 +325,15 @@ def create_default_command_registry() -> CommandRegistry:
             search_terms=("light", "dark", "contrast"),
         )
     )
+    registry.register(
+        SlashCommand(
+            "voice",
+            "Show or configure context-aware voice input.",
+            "/voice [setup]",
+            _voice_command,
+            search_terms=("microphone", "dictation", "speech", "asr"),
+        )
+    )
     return registry
 
 
@@ -410,6 +424,7 @@ def _hotkeys_command(context: CommandContext) -> CommandResult:
                 "- Ctrl+O: collapse or expand tool output",
                 "- Ctrl+C: clear prompt input when no text is selected",
                 "- Ctrl+D: quit",
+                "- F2: start or stop voice input",
             ]
         ),
     )
@@ -419,6 +434,14 @@ def _reload_command(context: CommandContext) -> CommandResult:
     if context.args:
         return CommandResult(handled=True, message="Usage: /reload")
     return CommandResult(handled=True, reload_requested=True)
+
+
+def _voice_command(context: CommandContext) -> CommandResult:
+    if not context.args:
+        return CommandResult(handled=True, voice_status_requested=True)
+    if context.args.strip().casefold() == "setup":
+        return CommandResult(handled=True, voice_setup_requested=True)
+    return CommandResult(handled=True, message="Usage: /voice [setup]")
 
 
 def _resume_command(context: CommandContext) -> CommandResult:
