@@ -179,6 +179,14 @@ export VOLCENGINE_ASR_API_KEY="你的火山语音 API key"
 }
 ```
 
+如果终端本身使用了透明背景，可在 TUI 中运行：
+
+```text
+/theme terminal-native
+```
+
+该主题使用终端默认前景色、背景色和 ANSI 调色板，因此会继承终端软件的配色与透明度；焦点、选中和错误状态仍保留高对比显示。
+
 润色只使用当前 active session 的有界快照：光标附近草稿、已有摘要、最近六条可见对话、cwd、Git branch、skill 名称和脱敏后的工具元数据。它不会读取 reasoning、完整工具输出、文件正文、diff、bash 命令或其他会话。每次润色后，TUI 会显示 rules、raw ASR、editor、session 和 coding metadata 的估算 token 比例。
 
 macOS 首次录音时，需要在“系统设置 → 隐私与安全性 → 麦克风”中允许当前终端访问麦克风。

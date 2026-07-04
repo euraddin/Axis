@@ -1309,7 +1309,7 @@ class AxisTuiApp(App[None]):
     BranchSummaryInstructionsScreen, ModelPickerScreen, LoginProviderPickerScreen,
     LoginScreen, ToolApprovalScreen, VoiceSetupScreen {
         align: center middle;
-        background: $axis-screen-background 70%;
+        background: $axis-screen-overlay-background;
     }
 
     #command-output, #theme-picker, #session-picker, #tree-picker,
@@ -1447,6 +1447,7 @@ class AxisTuiApp(App[None]):
             )
         )
         super().__init__()
+        self.theme = _textual_base_theme(self.tui_settings.theme)
         self._bindings = BindingsMap(_app_bindings(self.tui_settings.keybindings))
         self.session = session
         registry = getattr(session, "command_registry", None)
@@ -2602,6 +2603,7 @@ class AxisTuiApp(App[None]):
             theme=theme,
             auto_copy_selection=self.tui_settings.auto_copy_selection,
         )
+        self.theme = _textual_base_theme(theme)
         save_tui_settings(self.tui_settings)
         self.query_one(
             "#prompt", PromptInput
@@ -2773,11 +2775,13 @@ class AxisTuiApp(App[None]):
         theme = self.tui_settings.resolved_theme
         prompt.styles.border = (
             "tall",
-            _activity_prompt_border_color(
-                theme,
-                frame=self._activity_frame,
-                running=self.state.running,
-                shell_mode=_is_terminal_command_prompt(prompt.text),
+            _textual_color(
+                _activity_prompt_border_color(
+                    theme,
+                    frame=self._activity_frame,
+                    running=self.state.running,
+                    shell_mode=_is_terminal_command_prompt(prompt.text),
+                )
             ),
         )
         prefix.update(
@@ -3096,19 +3100,26 @@ def _render_activity_indicator(theme: TuiTheme, *, frame: int, running: bool) ->
     position = frame % cycle_length
     active_row = position if position < ACTIVITY_INDICATOR_HEIGHT else cycle_length - position
     direction = 1 if position < ACTIVITY_INDICATOR_HEIGHT else -1
-    trail = {
-        active_row: theme.accent,
-        active_row - direction: _blend_hex_colors(
-            theme.accent,
-            theme.screen_background,
-            fraction=0.35,
-        ),
-        active_row - (direction * 2): _blend_hex_colors(
-            theme.accent,
-            theme.screen_background,
-            fraction=0.65,
-        ),
-    }
+    if theme.accent.startswith("#") and theme.screen_background.startswith("#"):
+        trail = {
+            active_row: theme.accent,
+            active_row - direction: _blend_hex_colors(
+                theme.accent,
+                theme.screen_background,
+                fraction=0.35,
+            ),
+            active_row - (direction * 2): _blend_hex_colors(
+                theme.accent,
+                theme.screen_background,
+                fraction=0.65,
+            ),
+        }
+    else:
+        trail = {
+            active_row: theme.accent,
+            active_row - direction: f"dim {theme.accent}",
+            active_row - (direction * 2): f"dim {theme.accent}",
+        }
     rendered = Text()
     for row in range(ACTIVITY_INDICATOR_HEIGHT):
         color = trail.get(row)
@@ -3142,26 +3153,66 @@ def _hex_to_rgb(color: str) -> tuple[int, int, int]:
 def _theme_css_variables(theme: TuiTheme) -> dict[str, str]:
     """Translate typed theme values into Textual CSS variables."""
     return {
-        "axis-screen-background": theme.screen_background,
-        "axis-screen-text": theme.screen_text,
-        "axis-chrome-background": theme.chrome_background,
-        "axis-chrome-text": theme.chrome_text,
-        "axis-muted-text": theme.muted_text,
-        "axis-sidebar-background": theme.sidebar_background,
-        "axis-border": theme.border,
-        "axis-transcript-background": theme.transcript_background,
-        "axis-prompt-background": theme.prompt_background,
-        "axis-prompt-text": theme.prompt_text,
-        "axis-prompt-border": theme.prompt_border,
-        "axis-autocomplete-background": theme.autocomplete_background,
-        "axis-accent": theme.accent,
-        "axis-highlight-background": theme.highlight_background,
-        "axis-highlight-text": theme.highlight_text,
-        "axis-markdown-highlight": theme.markdown_heading,
-        "axis-markdown-table-header": theme.markdown_table_header,
-        "axis-markdown-table-border": theme.markdown_table_border,
-        "axis-markdown-inline-code": theme.markdown_inline_code,
-        "axis-markdown-code-block-background": theme.markdown_code_block_background,
-        "axis-markdown-link": theme.markdown_link,
-        "axis-markdown-bullet": theme.markdown_bullet,
+        "axis-screen-background": _textual_color(theme.screen_background),
+        "axis-screen-overlay-background": (
+            "transparent"
+            if theme.screen_background == "default"
+            else f"{_textual_color(theme.screen_background)} 70%"
+        ),
+        "axis-screen-text": _textual_color(theme.screen_text),
+        "axis-chrome-background": _textual_color(theme.chrome_background),
+        "axis-chrome-text": _textual_color(theme.chrome_text),
+        "axis-muted-text": _textual_color(theme.muted_text),
+        "axis-sidebar-background": _textual_color(theme.sidebar_background),
+        "axis-border": _textual_color(theme.border),
+        "axis-transcript-background": _textual_color(theme.transcript_background),
+        "axis-prompt-background": _textual_color(theme.prompt_background),
+        "axis-prompt-text": _textual_color(theme.prompt_text),
+        "axis-prompt-border": _textual_color(theme.prompt_border),
+        "axis-autocomplete-background": _textual_color(theme.autocomplete_background),
+        "axis-accent": _textual_color(theme.accent),
+        "axis-highlight-background": _textual_color(theme.highlight_background),
+        "axis-highlight-text": _textual_color(theme.highlight_text),
+        "axis-markdown-highlight": _textual_color(theme.markdown_heading),
+        "axis-markdown-table-header": _textual_color(theme.markdown_table_header),
+        "axis-markdown-table-border": _textual_color(theme.markdown_table_border),
+        "axis-markdown-inline-code": _textual_color(theme.markdown_inline_code),
+        "axis-markdown-code-block-background": _textual_color(theme.markdown_code_block_background),
+        "axis-markdown-link": _textual_color(theme.markdown_link),
+        "axis-markdown-bullet": _textual_color(theme.markdown_bullet),
     }
+
+
+_RICH_TO_TEXTUAL_ANSI_COLORS = {
+    "default": "ansi_default",
+    "black": "ansi_black",
+    "red": "ansi_red",
+    "green": "ansi_green",
+    "yellow": "ansi_yellow",
+    "blue": "ansi_blue",
+    "magenta": "ansi_magenta",
+    "cyan": "ansi_cyan",
+    "white": "ansi_white",
+    "bright_black": "ansi_bright_black",
+    "bright_red": "ansi_bright_red",
+    "bright_green": "ansi_bright_green",
+    "bright_yellow": "ansi_bright_yellow",
+    "bright_blue": "ansi_bright_blue",
+    "bright_magenta": "ansi_bright_magenta",
+    "bright_cyan": "ansi_bright_cyan",
+    "bright_white": "ansi_bright_white",
+}
+
+
+def _textual_color(color: str) -> str:
+    """Translate Rich ANSI names while preserving terminal palette semantics."""
+    return _RICH_TO_TEXTUAL_ANSI_COLORS.get(color, color)
+
+
+def _textual_base_theme(theme: TuiThemeName) -> str:
+    """Select Textual's renderer mode beneath an Axis theme."""
+    if theme == "terminal-native":
+        return "ansi-dark"
+    if theme == "axis-light":
+        return "textual-light"
+    return "textual-dark"

@@ -588,7 +588,44 @@ def test_tui_app_maps_omni_palette_and_registers_picker_option(tmp_path: Path) -
     assert variables["axis-prompt-background"] == "#201B2D"
     assert variables["axis-accent"] == "#FF79C6"
     assert variables["axis-markdown-inline-code"] == "#67E480"
-    assert ThemePickerScreen("omni").theme_names[-1] == "omni"
+    assert "omni" in ThemePickerScreen("omni").theme_names
+
+
+def test_tui_app_maps_terminal_native_theme_to_terminal_ansi_colors(tmp_path: Path) -> None:
+    app = AxisTuiApp(
+        CancellableSession(tmp_path),
+        tui_settings=TuiSettings(theme="terminal-native"),
+    )
+
+    variables = app.get_theme_variable_defaults()
+    assert app.theme == "ansi-dark"
+    assert app.native_ansi_color is True
+    assert variables["axis-screen-background"] == "ansi_default"
+    assert variables["axis-screen-overlay-background"] == "transparent"
+    assert variables["axis-screen-text"] == "ansi_default"
+    assert variables["axis-prompt-background"] == "ansi_default"
+    assert variables["axis-accent"] == "ansi_bright_yellow"
+    assert ThemePickerScreen("terminal-native").theme_names[-1] == "terminal-native"
+
+
+def test_terminal_native_theme_compiles_and_runs_headlessly(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = AxisTuiApp(
+            CancellableSession(tmp_path),
+            tui_settings=TuiSettings(theme="terminal-native"),
+        )
+        async with app.run_test(size=(100, 30)):
+            assert app.theme == "ansi-dark"
+            assert app.native_ansi_color is True
+            assert app.query_one("#prompt", PromptInput).styles.background.ansi == -1
+            assert app.screen.styles.background.ansi == -1
+            rendered = app.screen._compositor.render_update(full=True).render_segments(app.console)
+            assert "\x1b[49m" in rendered
+            app.adapter.apply(AgentStartEvent())
+            app._render_state()
+            assert app.state.running is True
+
+    asyncio.run(scenario())
 
 
 def test_f2_voice_inserts_polished_draft_at_frozen_cursor(tmp_path: Path) -> None:
@@ -1447,6 +1484,16 @@ def test_theme_command_argument_persists_and_picker_selects(
             await pilot.press("down", "enter")
             await pilot.pause()
             assert app.tui_settings.theme == "high-contrast"
+            assert app.theme == "textual-dark"
+            assert app.native_ansi_color is False
+
+            app._set_tui_theme("terminal-native")
+            assert app.theme == "ansi-dark"
+            assert app.native_ansi_color is True
+
+            app._set_tui_theme("axis-dark")
+            assert app.theme == "textual-dark"
+            assert app.native_ansi_color is False
 
     asyncio.run(scenario())
 

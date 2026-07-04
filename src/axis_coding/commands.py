@@ -15,7 +15,13 @@ from axis_coding.session_manager import SessionManager
 from axis_coding.skills import Skill
 from axis_coding.thinking import ThinkingLevel, normalize_thinking_level
 
-BUILTIN_COMMAND_THEME_NAMES = ("axis-dark", "axis-light", "high-contrast", "omni")
+BUILTIN_COMMAND_THEME_NAMES = (
+    "axis-dark",
+    "axis-light",
+    "high-contrast",
+    "omni",
+    "terminal-native",
+)
 
 
 class CommandSession(Protocol):

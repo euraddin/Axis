@@ -154,6 +154,9 @@ def test_quit_reload_and_theme_return_declarative_actions(tmp_path: Path) -> Non
     assert registry.execute(session, "/theme").theme_picker_requested is True  # type: ignore[arg-type]
     assert registry.execute(session, "/theme axis-light").theme == "axis-light"  # type: ignore[arg-type]
     assert registry.execute(session, "/theme omni").theme == "omni"  # type: ignore[arg-type]
+    assert registry.execute(session, "/theme terminal-native").theme == (  # type: ignore[arg-type]
+        "terminal-native"
+    )
 
     unknown = registry.execute(session, "/theme solarized")  # type: ignore[arg-type]
     assert unknown.message is not None

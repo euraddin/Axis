@@ -51,7 +51,13 @@ class TuiKeybindings:
         }
 
 
-type TuiThemeName = Literal["axis-dark", "axis-light", "high-contrast", "omni"]
+type TuiThemeName = Literal[
+    "axis-dark",
+    "axis-light",
+    "high-contrast",
+    "omni",
+    "terminal-native",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,11 +268,53 @@ OMNI_THEME = TuiTheme(
     },
 )
 
+TERMINAL_NATIVE_THEME = TuiTheme(
+    name="terminal-native",
+    screen_background="default",
+    screen_text="default",
+    chrome_background="default",
+    chrome_text="default",
+    muted_text="bright_black",
+    sidebar_background="default",
+    border="bright_black",
+    transcript_background="default",
+    prompt_background="default",
+    prompt_text="default",
+    prompt_border="bright_black",
+    autocomplete_background="default",
+    accent="bright_yellow",
+    highlight_background="bright_white",
+    highlight_text="black",
+    markdown_heading="bright_yellow",
+    markdown_table_header="default",
+    markdown_table_border="bright_black",
+    markdown_inline_code="bright_cyan",
+    markdown_code_block_background="default",
+    markdown_link="bright_blue",
+    markdown_bullet="bright_yellow",
+    completion_selected="bold black on bright_white",
+    completion_selected_description="black on bright_white",
+    completion_description="default",
+    syntax_theme="ansi_dark",
+    role_styles={
+        "user": TuiRoleStyle(border="bright_blue", body="default"),
+        "assistant": TuiRoleStyle(border="bright_green", body="default"),
+        "tool": TuiRoleStyle(border="bright_yellow", body="default"),
+        "error": TuiRoleStyle(border="bright_red", body="bold bright_red"),
+        "status": TuiRoleStyle(border="bright_black", body="default"),
+        "thinking": TuiRoleStyle(border="bright_cyan", body="default"),
+        "skill": TuiRoleStyle(border="bright_magenta", body="default"),
+        "branch_summary": TuiRoleStyle(border="bright_magenta", body="default"),
+        "compaction_summary": TuiRoleStyle(border="bright_magenta", body="default"),
+    },
+)
+
 _THEMES: dict[TuiThemeName, TuiTheme] = {
     AXIS_DARK_THEME.name: AXIS_DARK_THEME,
     AXIS_LIGHT_THEME.name: AXIS_LIGHT_THEME,
     HIGH_CONTRAST_THEME.name: HIGH_CONTRAST_THEME,
     OMNI_THEME.name: OMNI_THEME,
+    TERMINAL_NATIVE_THEME.name: TERMINAL_NATIVE_THEME,
 }
 BUILTIN_TUI_THEME_NAMES: tuple[TuiThemeName, ...] = tuple(_THEMES)
 
