@@ -26,7 +26,9 @@ class FinalTextRenderer:
         if isinstance(event, MessageEndEvent) and isinstance(event.message, AssistantMessage):
             self._last_assistant_text = event.message.content
         elif isinstance(event, ErrorEvent):
-            if not event.recoverable:
+            if not event.recoverable or bool(
+                event.data and event.data.get("request_aborted") is True
+            ):
                 self._failed = True
             self._error_messages.append(event.message)
 

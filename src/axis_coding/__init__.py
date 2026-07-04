@@ -14,7 +14,10 @@ from axis_coding.context import (
     discover_project_context_with_diagnostics,
 )
 from axis_coding.context_window import (
+    DEFAULT_AUTO_COMPACT_RATIO,
+    DEFAULT_COMPACT_RETAIN_TOKENS,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
+    ContextRetentionPlan,
     ContextUsageEstimate,
     RequestContextBreakdown,
     RequestContextPart,
@@ -24,6 +27,7 @@ from axis_coding.context_window import (
     estimate_message_tokens,
     estimate_text_tokens,
     estimate_tool_tokens,
+    plan_context_retention,
 )
 from axis_coding.credentials import CredentialStoreError, FileCredentialStore, credentials_path
 from axis_coding.paths import AxisPaths
@@ -168,11 +172,14 @@ __all__ = [
     "CommandContext",
     "CommandRegistry",
     "CommandResult",
+    "ContextRetentionPlan",
     "ContextUsageEstimate",
     "RequestContextBreakdown",
     "RequestContextPart",
     "OPERATING_PRINCIPLES",
     "DEFAULT_PROVIDER_NAME",
+    "DEFAULT_AUTO_COMPACT_RATIO",
+    "DEFAULT_COMPACT_RETAIN_TOKENS",
     "DEFAULT_CONTEXT_WINDOW_TOKENS",
     "DEFAULT_THINKING_LEVEL",
     "FileCredentialStore",
@@ -236,6 +243,7 @@ __all__ = [
     "estimate_message_tokens",
     "estimate_text_tokens",
     "estimate_tool_tokens",
+    "plan_context_retention",
     "credentials_path",
     "approval_handler_for_policy",
     "default_session_export_path",

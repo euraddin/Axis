@@ -7,6 +7,7 @@ from axis_agent import (
     AgentEndEvent,
     AgentToolResult,
     AssistantMessage,
+    ContextCompactionEvent,
     ErrorEvent,
     MessageDeltaEvent,
     MessageEndEvent,
@@ -44,10 +45,19 @@ def test_json_renderer_emits_strict_jsonl_and_tracks_failure() -> None:
     renderer.render(MessageStartEvent())
     renderer.render(QueueUpdateEvent(steering=("adjust",), follow_up=("after",)))
     renderer.render(ThinkingDeltaEvent(delta="private reasoning"))
+    renderer.render(
+        ContextCompactionEvent(
+            before_tokens=100,
+            after_tokens=40,
+            trigger_tokens=80,
+            compacted_entries=4,
+            retained_entries=2,
+        )
+    )
     renderer.render(ErrorEvent(message="provider failed", recoverable=False))
 
     lines = stdout.getvalue().splitlines()
-    assert len(lines) == 4
+    assert len(lines) == 5
     assert json.loads(lines[0]) == {
         "type": "message_start",
         "message_role": "assistant",
@@ -62,6 +72,16 @@ def test_json_renderer_emits_strict_jsonl_and_tracks_failure() -> None:
         "delta": "private reasoning",
     }
     assert json.loads(lines[3]) == {
+        "type": "context_compaction",
+        "automatic": True,
+        "before_tokens": 100,
+        "after_tokens": 40,
+        "trigger_tokens": 80,
+        "compacted_entries": 4,
+        "retained_entries": 2,
+        "replays_current_prompt": False,
+    }
+    assert json.loads(lines[4]) == {
         "type": "error",
         "message": "provider failed",
         "recoverable": False,
@@ -80,6 +100,15 @@ def test_transcript_renderer_streams_text_and_tool_activity() -> None:
     renderer.render(MessageDeltaEvent(delta="Hel"))
     renderer.render(MessageDeltaEvent(delta="lo"))
     renderer.render(MessageEndEvent(message=AssistantMessage(content="Hello")))
+    renderer.render(
+        ContextCompactionEvent(
+            before_tokens=100,
+            after_tokens=40,
+            trigger_tokens=80,
+            compacted_entries=4,
+            retained_entries=2,
+        )
+    )
     renderer.render(
         RetryEvent(
             attempt=2,
@@ -115,6 +144,7 @@ def test_transcript_renderer_streams_text_and_tool_activity() -> None:
     assert "private reasoning" not in stdout.getvalue()
     assert "private reasoning" not in stderr.getvalue()
     assert stderr.getvalue() == (
+        "… Auto-compacted context (100 → 40 tokens; kept 2 entries).\n"
         "… Retrying provider request 2/3 after HTTP 503.\n"
         '→ read {"path":"你好.py"}\n'
         "… reading\n"
@@ -142,3 +172,18 @@ def test_transcript_renderer_fails_on_non_recoverable_error() -> None:
 
     assert renderer.finish() is False
     assert stderr.getvalue() == "Error: provider failed\n"
+
+
+def test_renderers_fail_when_recoverable_compaction_error_aborts_request() -> None:
+    error = ErrorEvent(
+        message="compaction failed",
+        recoverable=True,
+        data={"kind": "auto_compaction", "request_aborted": True},
+    )
+    text = FinalTextRenderer(stdout=StringIO(), stderr=StringIO())
+    json_renderer = JsonEventRenderer(stdout=StringIO())
+    transcript = TranscriptRenderer(stdout=StringIO(), stderr=StringIO())
+
+    for renderer in (text, json_renderer, transcript):
+        renderer.render(error)
+        assert renderer.finish() is False

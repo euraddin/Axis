@@ -66,6 +66,21 @@ class QueueUpdateEvent(BaseModel):
     follow_up: tuple[str, ...] = ()
 
 
+class ContextCompactionEvent(BaseModel):
+    """A provider request compacted durable context before being sent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["context_compaction"] = "context_compaction"
+    automatic: bool = True
+    before_tokens: int
+    after_tokens: int
+    trigger_tokens: int
+    compacted_entries: int
+    retained_entries: int
+    replays_current_prompt: bool = False
+
+
 class MessageStartEvent(BaseModel):
     """A streamed transcript message has started."""
 
@@ -169,6 +184,7 @@ type AgentEvent = (
     | TurnEndEvent
     | RetryEvent
     | QueueUpdateEvent
+    | ContextCompactionEvent
     | MessageStartEvent
     | MessageDeltaEvent
     | ThinkingDeltaEvent

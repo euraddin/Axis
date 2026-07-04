@@ -23,7 +23,7 @@ from textual.widgets import Static
 
 from axis_coding.context_window import ContextUsageEstimate, RequestContextBreakdown
 from axis_coding.tui.autocomplete import CompletionState
-from axis_coding.tui.config import AXIS_DARK_THEME, TuiRoleStyle, TuiTheme
+from axis_coding.tui.config import AXIS_DARK_THEME, TuiRoleStyle, TuiTheme, textual_color
 from axis_coding.tui.state import ChatItem, TuiState, visible_chat_text
 
 AXIS_SIDEBAR_LOGO = "A X I S"
@@ -420,7 +420,7 @@ class TranscriptMessageWidget(Horizontal):
 
     def compose(self) -> Any:
         gutter = NonSelectableStatic("▌", classes="transcript-message-gutter")
-        gutter.styles.color = self._role_style.border
+        gutter.styles.color = textual_color(self._role_style.border)
         yield gutter
         yield self._body_widget()
 
@@ -446,9 +446,9 @@ class TranscriptMessageWidget(Horizontal):
         )
         foreground, background = _style_colors(self._role_style.body)
         if foreground:
-            body.styles.color = foreground
+            body.styles.color = textual_color(foreground)
         if background:
-            body.styles.background = background
+            body.styles.background = textual_color(background)
         return body
 
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:

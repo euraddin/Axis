@@ -89,6 +89,39 @@ from axis_coding.voice import (
 )
 from axis_coding.voice.config import VOLCENGINE_ASR_CREDENTIAL_NAME
 
+VALID_COMPACTION_SUMMARY = """## Goal
+Continue the task.
+
+## Constraints & Preferences
+Keep recent context verbatim.
+
+## Progress
+### Done
+Reviewed earlier work.
+
+### In Progress
+None
+
+### Blocked
+None
+
+## Key Decisions
+Use partial compaction.
+
+## Next Steps
+Continue.
+
+## Critical Context
+None
+
+<read-files>
+None
+</read-files>
+
+<modified-files>
+None
+</modified-files>"""
+
 
 async def wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> None:
     loop = asyncio.get_running_loop()
@@ -608,13 +641,15 @@ def test_tui_app_maps_terminal_native_theme_to_terminal_ansi_colors(tmp_path: Pa
     assert ThemePickerScreen("terminal-native").theme_names[-1] == "terminal-native"
 
 
-def test_terminal_native_theme_compiles_and_runs_headlessly(tmp_path: Path) -> None:
+def test_terminal_native_theme_compiles_and_renders_transcript_messages(
+    tmp_path: Path,
+) -> None:
     async def scenario() -> None:
         app = AxisTuiApp(
             CancellableSession(tmp_path),
             tui_settings=TuiSettings(theme="terminal-native"),
         )
-        async with app.run_test(size=(100, 30)):
+        async with app.run_test(size=(100, 30)) as pilot:
             assert app.theme == "ansi-dark"
             assert app.native_ansi_color is True
             assert app.query_one("#prompt", PromptInput).styles.background.ansi == -1
@@ -622,8 +657,17 @@ def test_terminal_native_theme_compiles_and_runs_headlessly(tmp_path: Path) -> N
             rendered = app.screen._compositor.render_update(full=True).render_segments(app.console)
             assert "\x1b[49m" in rendered
             app.adapter.apply(AgentStartEvent())
+            app.state.add_user_message("Hello from the user")
+            app.state.add_item("status", "Waiting")
             app._render_state()
+            await pilot.pause()
             assert app.state.running is True
+            gutters = list(app.query(".transcript-message-gutter"))
+            assert len(gutters) == 2
+            assert gutters[0].styles.color.ansi == 12
+            markdown_bodies = list(app.query(".transcript-markdown-body"))
+            assert len(markdown_bodies) == 1
+            assert markdown_bodies[0].styles.color.ansi == -1
 
     asyncio.run(scenario())
 
@@ -1329,6 +1373,7 @@ def test_ctrl_k_opens_registry_backed_command_completion(tmp_path: Path) -> None
             assert prompt.value == "/"
             assert [item.display for item in app.completion_state.items] == [
                 "/compact",
+                "/exit",
                 "/export",
                 "/hotkeys",
                 "/login",
@@ -1787,7 +1832,12 @@ def test_tui_compaction_reloads_semantic_summary(tmp_path: Path) -> None:
             parent_id="root",
             message=AssistantMessage(content="Earlier answer"),
         )
-        for entry in (root, answer, LeafEntry(entry_id="answer")):
+        recent = MessageEntry(
+            id="recent",
+            parent_id="answer",
+            message=UserMessage(content="Recent request"),
+        )
+        for entry in (root, answer, recent, LeafEntry(entry_id="recent")):
             await storage.append(entry)
         session = await CodingSession.load(
             CodingSessionConfig(
@@ -1795,7 +1845,7 @@ def test_tui_compaction_reloads_semantic_summary(tmp_path: Path) -> None:
                     [
                         [
                             ProviderResponseEndEvent(
-                                message=AssistantMessage(content="Generated summary")
+                                message=AssistantMessage(content=VALID_COMPACTION_SUMMARY)
                             )
                         ]
                     ]
@@ -1804,6 +1854,7 @@ def test_tui_compaction_reloads_semantic_summary(tmp_path: Path) -> None:
                 storage=storage,
                 cwd=tmp_path,
                 tools=[],
+                compact_retain_tokens=1,
             )
         )
         app = AxisTuiApp(session)
@@ -1817,9 +1868,64 @@ def test_tui_compaction_reloads_semantic_summary(tmp_path: Path) -> None:
             await pilot.pause()
 
             assert [(item.role, item.text) for item in app.state.items] == [
-                ("compaction_summary", "Compaction summary (Ctrl+O to expand)")
+                ("compaction_summary", "Compaction summary (Ctrl+O to expand)"),
+                ("user", "Recent request"),
             ]
-            assert app.state.items[0].tool_result_text == "Generated summary"
+            assert app.state.items[0].tool_result_text == VALID_COMPACTION_SUMMARY
+
+    asyncio.run(scenario())
+
+
+def test_tui_auto_compaction_reloads_without_duplicating_current_prompt(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "auto-compact-ui.jsonl")
+        root = MessageEntry(id="root", message=UserMessage(content="Earlier request"))
+        answer = MessageEntry(
+            id="answer",
+            parent_id="root",
+            message=AssistantMessage(content="Earlier answer"),
+        )
+        for entry in (root, answer, LeafEntry(entry_id="answer")):
+            await storage.append(entry)
+        provider = FakeProvider(
+            [
+                [
+                    ProviderResponseEndEvent(
+                        message=AssistantMessage(content=VALID_COMPACTION_SUMMARY)
+                    )
+                ],
+                [ProviderResponseEndEvent(message=AssistantMessage(content="Fresh answer"))],
+            ]
+        )
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                system="",
+                tools=[],
+                auto_compact_token_threshold=1,
+                compact_retain_tokens=1,
+            )
+        )
+        app = AxisTuiApp(session)
+
+        async with app.run_test(size=(110, 32)) as pilot:
+            prompt = app.query_one("#prompt", PromptInput)
+            prompt.value = "Current request"
+            prompt.cursor_position = len(prompt.value)
+            await pilot.press("enter")
+            await wait_until(lambda: len(provider.calls) == 2 and not session.is_running)
+            await pilot.pause()
+
+            visible = [(item.role, item.text) for item in app.state.items]
+            assert visible.count(("user", "Current request")) == 1
+            assert ("compaction_summary", "Compaction summary (Ctrl+O to expand)") in visible
+            assert ("assistant", "Fresh answer") in visible
+            assert not any(text == "Earlier request" for _, text in visible)
 
     asyncio.run(scenario())
 

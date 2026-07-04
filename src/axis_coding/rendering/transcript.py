@@ -8,6 +8,7 @@ from axis_agent import (
     AgentEndEvent,
     AgentEvent,
     AssistantMessage,
+    ContextCompactionEvent,
     ErrorEvent,
     MessageDeltaEvent,
     MessageEndEvent,
@@ -69,6 +70,15 @@ class TranscriptRenderer:
             self._write_stderr(f"→ {event.tool_call.name}{suffix}\n")
             return
 
+        if isinstance(event, ContextCompactionEvent):
+            self._close_assistant()
+            self._write_stderr(
+                "… Auto-compacted context "
+                f"({event.before_tokens} → {event.after_tokens} tokens; "
+                f"kept {event.retained_entries} entries).\n"
+            )
+            return
+
         if isinstance(event, ToolExecutionUpdateEvent):
             self._close_assistant()
             self._write_stderr(f"… {event.message}\n")
@@ -88,7 +98,9 @@ class TranscriptRenderer:
             return
 
         if isinstance(event, ErrorEvent):
-            if not event.recoverable:
+            if not event.recoverable or bool(
+                event.data and event.data.get("request_aborted") is True
+            ):
                 self._failed = True
             self._close_assistant()
             self._write_stderr(f"Error: {event.message}\n")

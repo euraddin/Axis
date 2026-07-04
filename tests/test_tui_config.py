@@ -17,6 +17,7 @@ from axis_coding.tui.config import (
     get_tui_theme,
     load_tui_settings,
     save_tui_settings,
+    textual_color,
     tui_settings_from_json,
     tui_settings_path,
 )
@@ -182,6 +183,12 @@ def test_builtin_themes_match_axis_brand_names_and_tau_visual_contract() -> None
     assert TERMINAL_NATIVE_THEME.screen_text == "default"
     assert TERMINAL_NATIVE_THEME.prompt_background == "default"
     assert TERMINAL_NATIVE_THEME.completion_selected == "bold black on bright_white"
+
+
+def test_textual_color_translates_rich_ansi_names_only_at_textual_boundaries() -> None:
+    assert textual_color("bright_blue") == "ansi_bright_blue"
+    assert textual_color("default") == "ansi_default"
+    assert textual_color("#112233") == "#112233"
 
 
 def test_omni_theme_round_trips_through_settings(tmp_path: Path) -> None:

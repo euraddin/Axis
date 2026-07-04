@@ -4,6 +4,7 @@ from axis_agent import (
     AgentEndEvent,
     AgentEvent,
     AgentStartEvent,
+    ContextCompactionEvent,
     ErrorEvent,
     MessageDeltaEvent,
     MessageEndEvent,
@@ -46,6 +47,13 @@ class TuiEventAdapter:
         elif isinstance(event, TurnEndEvent):
             if self.state.current_turn == event.turn:
                 self.state.current_turn = None
+        elif isinstance(event, ContextCompactionEvent):
+            self.state.add_item(
+                "status",
+                "Auto-compacted context "
+                f"({event.before_tokens} → {event.after_tokens} tokens; "
+                f"kept {event.retained_entries} entries).",
+            )
         elif isinstance(event, MessageStartEvent):
             if event.message_role == "assistant":
                 self.state.assistant_buffer = ""

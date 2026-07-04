@@ -15,7 +15,9 @@ class JsonEventRenderer:
 
     def render(self, event: AgentEvent) -> None:
         """Write and flush one event without adding non-JSON decoration."""
-        if isinstance(event, ErrorEvent) and not event.recoverable:
+        if isinstance(event, ErrorEvent) and (
+            not event.recoverable or bool(event.data and event.data.get("request_aborted") is True)
+        ):
             self._failed = True
         self._stdout.write(f"{event.model_dump_json()}\n")
         self._stdout.flush()

@@ -121,7 +121,9 @@ class AgentHarness:
 
     def replace_messages(self, messages: Sequence[AgentMessage]) -> None:
         """Replace the transcript during explicit state reconstruction."""
-        self._messages = list(messages)
+        # Keep the list identity stable: an active ``run_agent_loop`` holds a
+        # reference to this list while pre-request compaction may rebuild it.
+        self._messages[:] = messages
 
     def subscribe(self, listener: EventListener) -> Callable[[], None]:
         """Subscribe to events and return an unsubscribe callback."""

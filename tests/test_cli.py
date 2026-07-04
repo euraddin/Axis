@@ -277,6 +277,7 @@ def test_cli_positional_prompt_is_submitted_immediately_in_tui(
             "new_session": True,
             "provider_name": "deepseek",
             "auto_compact_token_threshold": 64_000,
+            "compact_retain_tokens": 20_000,
             "initial_prompt": "explain this repo",
         }
     ]
@@ -297,6 +298,17 @@ def test_cli_rejects_resume_with_new_session(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "--resume and --new-session cannot be used together" in result.stderr
+
+
+def test_cli_rejects_non_positive_compaction_retention(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["--cwd", str(tmp_path), "--compact-retain-tokens", "0"],
+        env={},
+    )
+
+    assert result.exit_code == 1
+    assert "--compact-retain-tokens must be greater than 0" in result.stderr
 
 
 def test_tui_startup_falls_back_to_first_credentialed_provider(

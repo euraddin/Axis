@@ -80,9 +80,16 @@ def main(
         int | None,
         typer.Option(
             "--auto-compact-threshold",
-            help="Context threshold displayed by the TUI compact status.",
+            help="Absolute context-token threshold for automatic compaction.",
         ),
     ] = None,
+    compact_retain_tokens: Annotated[
+        int,
+        typer.Option(
+            "--compact-retain-tokens",
+            help="Approximate newest-message tokens kept verbatim during compaction.",
+        ),
+    ] = 20_000,
     output: Annotated[
         PrintOutputMode,
         typer.Option("--output", "-o", help="Output format for print mode."),
@@ -115,6 +122,7 @@ def main(
                     new_session=new_session,
                     provider_name=provider,
                     auto_compact_token_threshold=auto_compact_threshold,
+                    compact_retain_tokens=compact_retain_tokens,
                     initial_prompt=initial_prompt,
                 )
             )
@@ -248,6 +256,7 @@ async def run_deepseek_tui_mode(
     new_session: bool = False,
     provider_name: str | None = None,
     auto_compact_token_threshold: int | None = None,
+    compact_retain_tokens: int = 20_000,
     initial_prompt: str | None = None,
     paths: AxisPaths | None = None,
     session_manager: SessionManager | None = None,
@@ -257,6 +266,8 @@ async def run_deepseek_tui_mode(
         raise RuntimeError("--resume and --new-session cannot be used together")
     if auto_compact_token_threshold is not None and auto_compact_token_threshold <= 0:
         raise RuntimeError("--auto-compact-threshold must be greater than 0")
+    if compact_retain_tokens <= 0:
+        raise RuntimeError("--compact-retain-tokens must be greater than 0")
     runtime_paths = paths if paths is not None else AxisPaths()
     manager = session_manager or SessionManager(runtime_paths)
     settings = load_provider_settings(runtime_paths)
@@ -313,6 +324,7 @@ async def run_deepseek_tui_mode(
                 runtime_provider_config=runtime_provider_config,
                 thinking_level=thinking_level,
                 auto_compact_token_threshold=auto_compact_token_threshold,
+                compact_retain_tokens=compact_retain_tokens,
             )
         )
         await run_tui_app(

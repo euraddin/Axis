@@ -18,6 +18,7 @@ from axis_coding import (
     estimate_message_tokens,
     estimate_text_tokens,
     estimate_tool_tokens,
+    plan_context_retention,
 )
 
 
@@ -48,6 +49,50 @@ def test_context_estimates_are_deterministic_and_include_protocol_data() -> None
 
 def test_unicode_estimate_uses_encoded_size_instead_of_character_count() -> None:
     assert estimate_text_tokens("你好世界") > estimate_text_tokens("abcd")
+
+
+def test_retention_plan_keeps_complete_newest_user_turns() -> None:
+    messages = (
+        UserMessage(content="old request"),
+        AssistantMessage(content="old answer"),
+        UserMessage(content="inspect"),
+        AssistantMessage(
+            tool_calls=[ToolCall(id="call-1", name="read", arguments={"path": "a.py"})]
+        ),
+        ToolResultMessage(tool_call_id="call-1", name="read", content="contents"),
+        AssistantMessage(content="inspection done"),
+        UserMessage(content="newest request"),
+    )
+    newest_tokens = estimate_message_tokens(messages[-1])
+
+    plan = plan_context_retention(
+        entry_ids=tuple(f"entry-{index}" for index in range(len(messages))),
+        messages=messages,
+        retain_tokens=newest_tokens + 1,
+    )
+
+    assert plan.summarized_entry_ids == ("entry-0", "entry-1")
+    assert plan.retained_entry_ids == tuple(f"entry-{index}" for index in range(2, 7))
+    assert plan.retained_messages[1].tool_calls[0].id == "call-1"  # type: ignore[union-attr]
+    assert isinstance(plan.retained_messages[2], ToolResultMessage)
+
+
+def test_retention_plan_includes_the_turn_that_reaches_the_threshold() -> None:
+    messages = (
+        UserMessage(content="older"),
+        AssistantMessage(content="answer"),
+        UserMessage(content="newest"),
+    )
+    newest_tokens = estimate_message_tokens(messages[-1])
+
+    plan = plan_context_retention(
+        entry_ids=("older", "answer", "newest"),
+        messages=messages,
+        retain_tokens=newest_tokens,
+    )
+
+    assert plan.summarized_entry_ids == ("older", "answer")
+    assert plan.retained_entry_ids == ("newest",)
 
 
 def test_context_usage_reports_system_message_and_tool_proportions(tmp_path: Path) -> None:
@@ -108,8 +153,25 @@ def test_coding_session_exposes_provider_window_and_display_threshold(
 
         assert session.context_window_tokens == 200_000
         assert session.auto_compact_token_threshold == 64_000
+        assert session.compact_retain_tokens == 20_000
         assert session.context_usage.total_tokens == session.context_token_estimate
         assert session.context_usage.system_tokens > 0
         assert session.context_usage.tool_tokens == 0
+
+        default_session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="fake",
+                storage=JsonlSessionStorage(tmp_path / "default-threshold.jsonl"),
+                cwd=tmp_path,
+                tools=[],
+                provider_name="local",
+                provider_settings=ProviderSettings(
+                    default_provider="local",
+                    providers=(provider_config,),
+                ),
+            )
+        )
+        assert default_session.auto_compact_token_threshold == 160_000
 
     asyncio.run(scenario())

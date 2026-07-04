@@ -34,6 +34,7 @@ from axis_agent import (
     AgentEndEvent,
     AgentEvent,
     AgentMessage,
+    ContextCompactionEvent,
     ErrorEvent,
     MessageDeltaEvent,
     MessageEndEvent,
@@ -42,6 +43,7 @@ from axis_agent import (
     ToolApprovalDecision,
     ToolCall,
     TurnStartEvent,
+    UserMessage,
 )
 from axis_agent.tools import AgentTool, ToolCancellationToken
 from axis_coding.commands import (
@@ -96,6 +98,7 @@ from axis_coding.tui.config import (
     TuiThemeName,
     load_tui_settings,
     save_tui_settings,
+    textual_color,
 )
 from axis_coding.tui.state import TuiState, format_terminal_command_result_block
 from axis_coding.tui.widgets import (
@@ -1466,6 +1469,7 @@ class AxisTuiApp(App[None]):
         self._prompt_worker: Worker[None] | None = None
         self._request_context_usage: ContextUsageEstimate | RequestContextBreakdown | None = None
         self._request_context_turn: int | None = None
+        self._compaction_reloaded_user_content: str | None = None
         self._voice_controller: VoiceInputController | None = None
         self._voice_anchor: tuple[tuple[int, int], tuple[int, int]] | None = None
         self._voice_editor_text = ""
@@ -1833,7 +1837,23 @@ class AxisTuiApp(App[None]):
     async def _run_prompt(self, content: str) -> None:
         try:
             async for event in self.session.prompt(content):
-                self.adapter.apply(event)
+                if isinstance(event, ContextCompactionEvent):
+                    self._reload_visible_session()
+                    messages = tuple(getattr(self.session, "messages", ()))
+                    last = messages[-1] if messages else None
+                    self._compaction_reloaded_user_content = (
+                        last.content
+                        if event.replays_current_prompt and isinstance(last, UserMessage)
+                        else None
+                    )
+                skip_reloaded_user = False
+                if isinstance(event, MessageEndEvent) and isinstance(event.message, UserMessage):
+                    skip_reloaded_user = (
+                        event.message.content == self._compaction_reloaded_user_content
+                    )
+                    self._compaction_reloaded_user_content = None
+                if not skip_reloaded_user:
+                    self.adapter.apply(event)
                 if isinstance(event, TurnStartEvent):
                     self._capture_request_context_usage(event.turn)
                 await self._apply_streaming_transcript_event(event)
@@ -2775,7 +2795,7 @@ class AxisTuiApp(App[None]):
         theme = self.tui_settings.resolved_theme
         prompt.styles.border = (
             "tall",
-            _textual_color(
+            textual_color(
                 _activity_prompt_border_color(
                     theme,
                     frame=self._activity_frame,
@@ -3153,60 +3173,34 @@ def _hex_to_rgb(color: str) -> tuple[int, int, int]:
 def _theme_css_variables(theme: TuiTheme) -> dict[str, str]:
     """Translate typed theme values into Textual CSS variables."""
     return {
-        "axis-screen-background": _textual_color(theme.screen_background),
+        "axis-screen-background": textual_color(theme.screen_background),
         "axis-screen-overlay-background": (
             "transparent"
             if theme.screen_background == "default"
-            else f"{_textual_color(theme.screen_background)} 70%"
+            else f"{textual_color(theme.screen_background)} 70%"
         ),
-        "axis-screen-text": _textual_color(theme.screen_text),
-        "axis-chrome-background": _textual_color(theme.chrome_background),
-        "axis-chrome-text": _textual_color(theme.chrome_text),
-        "axis-muted-text": _textual_color(theme.muted_text),
-        "axis-sidebar-background": _textual_color(theme.sidebar_background),
-        "axis-border": _textual_color(theme.border),
-        "axis-transcript-background": _textual_color(theme.transcript_background),
-        "axis-prompt-background": _textual_color(theme.prompt_background),
-        "axis-prompt-text": _textual_color(theme.prompt_text),
-        "axis-prompt-border": _textual_color(theme.prompt_border),
-        "axis-autocomplete-background": _textual_color(theme.autocomplete_background),
-        "axis-accent": _textual_color(theme.accent),
-        "axis-highlight-background": _textual_color(theme.highlight_background),
-        "axis-highlight-text": _textual_color(theme.highlight_text),
-        "axis-markdown-highlight": _textual_color(theme.markdown_heading),
-        "axis-markdown-table-header": _textual_color(theme.markdown_table_header),
-        "axis-markdown-table-border": _textual_color(theme.markdown_table_border),
-        "axis-markdown-inline-code": _textual_color(theme.markdown_inline_code),
-        "axis-markdown-code-block-background": _textual_color(theme.markdown_code_block_background),
-        "axis-markdown-link": _textual_color(theme.markdown_link),
-        "axis-markdown-bullet": _textual_color(theme.markdown_bullet),
+        "axis-screen-text": textual_color(theme.screen_text),
+        "axis-chrome-background": textual_color(theme.chrome_background),
+        "axis-chrome-text": textual_color(theme.chrome_text),
+        "axis-muted-text": textual_color(theme.muted_text),
+        "axis-sidebar-background": textual_color(theme.sidebar_background),
+        "axis-border": textual_color(theme.border),
+        "axis-transcript-background": textual_color(theme.transcript_background),
+        "axis-prompt-background": textual_color(theme.prompt_background),
+        "axis-prompt-text": textual_color(theme.prompt_text),
+        "axis-prompt-border": textual_color(theme.prompt_border),
+        "axis-autocomplete-background": textual_color(theme.autocomplete_background),
+        "axis-accent": textual_color(theme.accent),
+        "axis-highlight-background": textual_color(theme.highlight_background),
+        "axis-highlight-text": textual_color(theme.highlight_text),
+        "axis-markdown-highlight": textual_color(theme.markdown_heading),
+        "axis-markdown-table-header": textual_color(theme.markdown_table_header),
+        "axis-markdown-table-border": textual_color(theme.markdown_table_border),
+        "axis-markdown-inline-code": textual_color(theme.markdown_inline_code),
+        "axis-markdown-code-block-background": textual_color(theme.markdown_code_block_background),
+        "axis-markdown-link": textual_color(theme.markdown_link),
+        "axis-markdown-bullet": textual_color(theme.markdown_bullet),
     }
-
-
-_RICH_TO_TEXTUAL_ANSI_COLORS = {
-    "default": "ansi_default",
-    "black": "ansi_black",
-    "red": "ansi_red",
-    "green": "ansi_green",
-    "yellow": "ansi_yellow",
-    "blue": "ansi_blue",
-    "magenta": "ansi_magenta",
-    "cyan": "ansi_cyan",
-    "white": "ansi_white",
-    "bright_black": "ansi_bright_black",
-    "bright_red": "ansi_bright_red",
-    "bright_green": "ansi_bright_green",
-    "bright_yellow": "ansi_bright_yellow",
-    "bright_blue": "ansi_bright_blue",
-    "bright_magenta": "ansi_bright_magenta",
-    "bright_cyan": "ansi_bright_cyan",
-    "bright_white": "ansi_bright_white",
-}
-
-
-def _textual_color(color: str) -> str:
-    """Translate Rich ANSI names while preserving terminal palette semantics."""
-    return _RICH_TO_TEXTUAL_ANSI_COLORS.get(color, color)
 
 
 def _textual_base_theme(theme: TuiThemeName) -> str:

@@ -144,6 +144,8 @@ axis --model deepseek-v4-flash
 
 TUI 与 print mode 使用同一个 CodingSession、system prompt、工具和 JSONL 存储，不维护第二套 agent 逻辑。
 
+每次请求 Provider 前，CodingSession 会估算 system、messages 和工具定义的总 token；默认达到模型上下文窗口的 80% 时自动压缩。压缩保留最近约 20K token 的完整用户轮次，把更早内容整理为结构化摘要，原始 JSONL 历史不会删除。可用 `--auto-compact-threshold` 覆盖触发值，用 `--compact-retain-tokens` 调整原文保留窗口。
+
 ### 上下文感知语音输入
 
 TUI 支持“豆包 Seed ASR 2.0 实时转写 → DeepSeekV4pro 上下文润色 → 编辑器草稿”的语音管线。它不会自动提交，也不会保存音频或未提交的原始转写。
@@ -207,4 +209,4 @@ uv pip check
 
 ## v2 范围
 
-多 Provider 与登录、model picker、session resume/export、context accounting、自动 compaction、branching、完整 slash registry、TUI autocomplete/主题/extensions，以及权限沙箱留待 v2。
+多 Provider 与登录、model picker、session resume/export、context accounting、branching、完整 slash registry、TUI autocomplete/主题/extensions，以及权限沙箱留待 v2。

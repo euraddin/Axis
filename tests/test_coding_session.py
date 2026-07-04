@@ -15,6 +15,8 @@ from axis_agent import (
     AssistantMessage,
     BranchSummaryEntry,
     CompactionEntry,
+    ContextCompactionEvent,
+    ErrorEvent,
     JsonlSessionStorage,
     LeafEntry,
     MessageEntry,
@@ -25,7 +27,7 @@ from axis_agent import (
     UserMessage,
 )
 from axis_agent.types import JSONValue
-from axis_ai import FakeProvider, ProviderResponseEndEvent
+from axis_ai import FakeProvider, ProviderErrorEvent, ProviderResponseEndEvent
 from axis_coding import (
     AxisPaths,
     AxisResourcePaths,
@@ -34,6 +36,7 @@ from axis_coding import (
     CodingSessionError,
     FileCredentialStore,
     ModelChoice,
+    OpenAICompatibleProviderConfig,
     ProviderSettings,
     ReloadCategorySummary,
     ResourceError,
@@ -46,6 +49,40 @@ from axis_coding import (
 
 async def collect_events(stream: AsyncIterator[AgentEvent]) -> list[AgentEvent]:
     return [event async for event in stream]
+
+
+VALID_COMPACTION_SUMMARY = """## Goal
+Keep working on Axis.
+
+## Constraints & Preferences
+Keep recent turns verbatim.
+
+## Progress
+### Done
+Reviewed the older work.
+
+### In Progress
+Continue implementation.
+
+### Blocked
+None
+
+## Key Decisions
+Use partial compaction.
+
+## Next Steps
+Run tests.
+
+## Critical Context
+The session is append-only.
+
+<read-files>
+src/axis_coding/session.py
+</read-files>
+
+<modified-files>
+None
+</modified-files>"""
 
 
 def test_new_coding_session_prepares_metadata_without_creating_file(
@@ -977,9 +1014,10 @@ def test_branch_summary_and_compaction_rebuild_provider_context(tmp_path: Path) 
                         message=AssistantMessage(content="The abandoned branch went left.")
                     )
                 ],
+                [ProviderResponseEndEvent(message=AssistantMessage(content="New direction"))],
                 [
                     ProviderResponseEndEvent(
-                        message=AssistantMessage(content="Compact summary of the branch.")
+                        message=AssistantMessage(content=VALID_COMPACTION_SUMMARY)
                     )
                 ],
             ]
@@ -991,6 +1029,7 @@ def test_branch_summary_and_compaction_rebuild_provider_context(tmp_path: Path) 
                 storage=storage,
                 cwd=tmp_path,
                 tools=[],
+                compact_retain_tokens=1,
             )
         )
 
@@ -999,15 +1038,478 @@ def test_branch_summary_and_compaction_rebuild_provider_context(tmp_path: Path) 
         assert len(session.messages) == 1
         assert "The abandoned branch went left." in session.messages[0].content
 
+        await collect_events(session.prompt("Continue here"))
         compacted = await session.compact("Keep implementation decisions.")
-        assert compacted == "Compacted 1 context entries."
-        assert session.messages == (
-            UserMessage(content="Previous conversation summary:\nCompact summary of the branch."),
+        assert compacted == "Compacted 1 context entries; retained 2 verbatim."
+        assert session.messages[0] == UserMessage(
+            content=f"Previous conversation summary:\n{VALID_COMPACTION_SUMMARY}"
+        )
+        assert session.messages[1:] == (
+            UserMessage(content="Continue here"),
+            AssistantMessage(content="New direction"),
         )
         entries = await storage.read_all()
         assert any(isinstance(entry, BranchSummaryEntry) for entry in entries)
         assert any(isinstance(entry, CompactionEntry) for entry in entries)
-        assert "Additional instructions" in provider.calls[1][2][0].content
+        assert "Additional instructions" in provider.calls[2][2][0].content
+        assert "conversation-json" in provider.calls[2][2][0].content
+
+    asyncio.run(scenario())
+
+
+def test_auto_compaction_runs_before_provider_and_preserves_structured_tool_context(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "auto-compact.jsonl")
+        call = ToolCall(id="call-old", name="read", arguments={"path": "README.md"})
+        entries = (
+            MessageEntry(id="old-user", message=UserMessage(content="Inspect the project")),
+            MessageEntry(
+                id="old-assistant",
+                parent_id="old-user",
+                message=AssistantMessage(
+                    tool_calls=[call],
+                    provider_data={"reasoning_content": "secret reasoning"},
+                ),
+            ),
+            MessageEntry(
+                id="old-result",
+                parent_id="old-assistant",
+                message=ToolResultMessage(
+                    tool_call_id=call.id,
+                    name=call.name,
+                    content="README contents",
+                ),
+            ),
+            MessageEntry(
+                id="old-final",
+                parent_id="old-result",
+                message=AssistantMessage(content="Inspection complete"),
+            ),
+            LeafEntry(entry_id="old-final"),
+        )
+        for entry in entries:
+            await storage.append(entry)
+        provider = FakeProvider(
+            [
+                [
+                    ProviderResponseEndEvent(
+                        message=AssistantMessage(content=VALID_COMPACTION_SUMMARY)
+                    )
+                ],
+                [ProviderResponseEndEvent(message=AssistantMessage(content="Fresh answer"))],
+                [
+                    ProviderResponseEndEvent(
+                        message=AssistantMessage(content=VALID_COMPACTION_SUMMARY)
+                    )
+                ],
+                [ProviderResponseEndEvent(message=AssistantMessage(content="Second answer"))],
+            ]
+        )
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                system="",
+                tools=[],
+                auto_compact_token_threshold=1,
+                compact_retain_tokens=1,
+            )
+        )
+
+        events = await collect_events(session.prompt("Newest request"))
+
+        compacted = next(event for event in events if isinstance(event, ContextCompactionEvent))
+        assert compacted.compacted_entries == 4
+        assert compacted.retained_entries == 1
+        assert [event.type for event in events[:3]] == [
+            "agent_start",
+            "context_compaction",
+            "turn_start",
+        ]
+        summary_prompt = provider.calls[0][2][0].content
+        assert '"name":"read"' in summary_prompt
+        assert '"path":"README.md"' in summary_prompt
+        assert "README contents" in summary_prompt
+        assert "secret reasoning" not in summary_prompt
+        assert provider.calls[1][2] == [
+            UserMessage(content=f"Previous conversation summary:\n{VALID_COMPACTION_SUMMARY}"),
+            UserMessage(content="Newest request"),
+        ]
+        persisted = await storage.read_all()
+        assert [entry.id for entry in persisted if isinstance(entry, MessageEntry)][:4] == [
+            "old-user",
+            "old-assistant",
+            "old-result",
+            "old-final",
+        ]
+
+        await collect_events(session.prompt("Second request"))
+        assert "Previous conversation summary" in provider.calls[2][2][0].content
+        persisted = await storage.read_all()
+        assert len([entry for entry in persisted if isinstance(entry, CompactionEntry)]) == 2
+        assert provider.calls[3][2][-1] == UserMessage(content="Second request")
+
+    asyncio.run(scenario())
+
+
+def test_auto_compaction_aborts_at_hard_window_when_no_older_turn_exists(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        provider_config = OpenAICompatibleProviderConfig(
+            name="local",
+            base_url="https://local.invalid/v1",
+            api_key_env="AXIS_LOCAL_KEY",
+            credential_name="local",
+            models=("fake",),
+            default_model="fake",
+            context_windows={"fake": 10},
+        )
+        provider = FakeProvider([])
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,
+                model="fake",
+                storage=JsonlSessionStorage(tmp_path / "auto-hard-window.jsonl"),
+                cwd=tmp_path,
+                system="",
+                tools=[],
+                provider_name="local",
+                provider_settings=ProviderSettings(
+                    default_provider="local",
+                    providers=(provider_config,),
+                ),
+                auto_compact_token_threshold=1,
+            )
+        )
+
+        events = await collect_events(session.prompt("x" * 100))
+
+        error = next(event for event in events if isinstance(event, ErrorEvent))
+        assert "no complete older user turn" in error.message
+        assert provider.calls == []
+        assert session.messages == (UserMessage(content="x" * 100),)
+
+    asyncio.run(scenario())
+
+
+def test_auto_compaction_retries_invalid_format_once_then_succeeds(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "auto-retry.jsonl")
+        old = MessageEntry(id="old", message=UserMessage(content="Old request"))
+        await storage.append(old)
+        await storage.append(LeafEntry(entry_id=old.id))
+        provider = FakeProvider(
+            [
+                [ProviderResponseEndEvent(message=AssistantMessage(content="invalid"))],
+                [
+                    ProviderResponseEndEvent(
+                        message=AssistantMessage(content=VALID_COMPACTION_SUMMARY)
+                    )
+                ],
+                [ProviderResponseEndEvent(message=AssistantMessage(content="Done"))],
+            ]
+        )
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                system="",
+                tools=[],
+                auto_compact_token_threshold=1,
+                compact_retain_tokens=1,
+            )
+        )
+
+        events = await collect_events(session.prompt("New request"))
+
+        assert any(isinstance(event, ContextCompactionEvent) for event in events)
+        assert len(provider.calls) == 3
+        assert "Rewrite your previous response" in provider.calls[1][2][-1].content
+        assert provider.calls[2][2][-1] == UserMessage(content="New request")
+
+    asyncio.run(scenario())
+
+
+def test_auto_compaction_aborts_provider_request_after_two_invalid_summaries(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "auto-invalid.jsonl")
+        old = MessageEntry(id="old", message=UserMessage(content="Old request"))
+        await storage.append(old)
+        await storage.append(LeafEntry(entry_id=old.id))
+        provider = FakeProvider(
+            [
+                [ProviderResponseEndEvent(message=AssistantMessage(content="invalid one"))],
+                [ProviderResponseEndEvent(message=AssistantMessage(content="invalid two"))],
+            ]
+        )
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                system="",
+                tools=[],
+                auto_compact_token_threshold=1,
+                compact_retain_tokens=1,
+            )
+        )
+
+        events = await collect_events(session.prompt("New request"))
+
+        error = next(event for event in events if isinstance(event, ErrorEvent))
+        assert error.recoverable is True
+        assert error.data == {"kind": "auto_compaction", "request_aborted": True}
+        assert len(provider.calls) == 2
+        assert not any(isinstance(entry, CompactionEntry) for entry in await storage.read_all())
+        assert session.messages[-1] == UserMessage(content="New request")
+        assert session.is_running is False
+
+    asyncio.run(scenario())
+
+
+def test_auto_compaction_does_not_retry_provider_error(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "auto-provider-error.jsonl")
+        old = MessageEntry(id="old", message=UserMessage(content="Old request"))
+        await storage.append(old)
+        await storage.append(LeafEntry(entry_id=old.id))
+        provider = FakeProvider([[ProviderErrorEvent(message="summary unavailable")]])
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                system="",
+                tools=[],
+                auto_compact_token_threshold=1,
+                compact_retain_tokens=1,
+            )
+        )
+
+        events = await collect_events(session.prompt("New request"))
+
+        error = next(event for event in events if isinstance(event, ErrorEvent))
+        assert "summary unavailable" in error.message
+        assert len(provider.calls) == 1
+        assert not any(isinstance(entry, CompactionEntry) for entry in await storage.read_all())
+
+    asyncio.run(scenario())
+
+
+def test_cancel_stops_automatic_compaction_without_persisting_summary(tmp_path: Path) -> None:
+    class BlockingSummaryProvider:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.calls = 0
+
+        def stream_response(self, **kwargs: object) -> AsyncIterator[object]:
+            signal = kwargs["signal"]
+            self.calls += 1
+
+            async def iterator() -> AsyncIterator[object]:
+                self.started.set()
+                while not signal.is_cancelled():  # type: ignore[union-attr]
+                    await asyncio.sleep(0)
+                if False:
+                    yield ProviderResponseEndEvent(message=AssistantMessage(content="unused"))
+
+            return iterator()
+
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "auto-cancel.jsonl")
+        old = MessageEntry(id="old", message=UserMessage(content="Old request"))
+        await storage.append(old)
+        await storage.append(LeafEntry(entry_id=old.id))
+        provider = BlockingSummaryProvider()
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,  # type: ignore[arg-type]
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                system="",
+                tools=[],
+                auto_compact_token_threshold=1,
+                compact_retain_tokens=1,
+            )
+        )
+
+        running = asyncio.create_task(collect_events(session.prompt("New request")))
+        await provider.started.wait()
+        session.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+        assert provider.calls == 1
+        assert not any(isinstance(entry, CompactionEntry) for entry in await storage.read_all())
+        assert session.is_running is False
+
+    asyncio.run(scenario())
+
+
+def test_auto_compaction_checks_again_before_tool_continuation(tmp_path: Path) -> None:
+    async def executor(
+        arguments: Mapping[str, JSONValue],
+        signal: object | None = None,
+    ) -> AgentToolResult:
+        del arguments, signal
+        return AgentToolResult(
+            tool_call_id="wrong",
+            name="read",
+            ok=True,
+            content="x" * 4_000,
+        )
+
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / "auto-tool-turn.jsonl")
+        old_user = MessageEntry(id="old-user", message=UserMessage(content="Old request"))
+        old_answer = MessageEntry(
+            id="old-answer",
+            parent_id=old_user.id,
+            message=AssistantMessage(content="Old answer"),
+        )
+        for entry in (old_user, old_answer, LeafEntry(entry_id=old_answer.id)):
+            await storage.append(entry)
+        tool = AgentTool(
+            name="read",
+            description="Read a file.",
+            input_schema={"type": "object"},
+            executor=executor,
+        )
+        call = ToolCall(id="call-new", name="read", arguments={"path": "large.txt"})
+        provider = FakeProvider(
+            [
+                [
+                    ProviderResponseEndEvent(
+                        message=AssistantMessage(tool_calls=[call]),
+                        finish_reason="tool_calls",
+                    )
+                ],
+                [
+                    ProviderResponseEndEvent(
+                        message=AssistantMessage(content=VALID_COMPACTION_SUMMARY)
+                    )
+                ],
+                [ProviderResponseEndEvent(message=AssistantMessage(content="Finished"))],
+            ]
+        )
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                system="",
+                tools=[tool],
+                auto_compact_token_threshold=500,
+                compact_retain_tokens=1,
+            )
+        )
+
+        events = await collect_events(session.prompt("Read the large file"))
+
+        compacted = [event for event in events if isinstance(event, ContextCompactionEvent)]
+        assert len(compacted) == 1
+        assert len(provider.calls) == 3
+        assert "Old request" in provider.calls[1][2][0].content
+        continued_messages = provider.calls[2][2]
+        assert continued_messages[0] == UserMessage(
+            content=f"Previous conversation summary:\n{VALID_COMPACTION_SUMMARY}"
+        )
+        assert any(isinstance(message, ToolResultMessage) for message in continued_messages)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("streaming_behavior", ["steer", "follow_up"])
+def test_auto_compaction_checks_queued_user_messages_before_provider(
+    tmp_path: Path,
+    streaming_behavior: str,
+) -> None:
+    class QueueAwareProvider:
+        def __init__(self) -> None:
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+            self.calls: list[tuple[str, str, list[object], list[object]]] = []
+
+        def stream_response(
+            self,
+            *,
+            model: str,
+            system: str,
+            messages: list[object],
+            tools: list[object],
+            signal: object | None = None,
+        ) -> AsyncIterator[object]:
+            del signal
+            call_index = len(self.calls)
+            self.calls.append((model, system, list(messages), list(tools)))
+
+            async def iterator() -> AsyncIterator[object]:
+                if call_index == 0:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                    yield ProviderResponseEndEvent(message=AssistantMessage(content="First answer"))
+                elif call_index == 1:
+                    yield ProviderResponseEndEvent(
+                        message=AssistantMessage(content=VALID_COMPACTION_SUMMARY)
+                    )
+                else:
+                    yield ProviderResponseEndEvent(message=AssistantMessage(content="Final answer"))
+
+            return iterator()
+
+    async def scenario() -> None:
+        storage = JsonlSessionStorage(tmp_path / f"auto-queued-{streaming_behavior}.jsonl")
+        old_user = MessageEntry(id="old-user", message=UserMessage(content="Old request"))
+        old_answer = MessageEntry(
+            id="old-answer",
+            parent_id=old_user.id,
+            message=AssistantMessage(content="Old answer"),
+        )
+        for entry in (old_user, old_answer, LeafEntry(entry_id=old_answer.id)):
+            await storage.append(entry)
+        provider = QueueAwareProvider()
+        session = await CodingSession.load(
+            CodingSessionConfig(
+                provider=provider,  # type: ignore[arg-type]
+                model="fake",
+                storage=storage,
+                cwd=tmp_path,
+                system="",
+                tools=[],
+                auto_compact_token_threshold=500,
+                compact_retain_tokens=1,
+            )
+        )
+
+        running = asyncio.create_task(collect_events(session.prompt("Initial request")))
+        await provider.first_started.wait()
+        queued = await collect_events(
+            session.prompt(
+                "queued " + "x" * 4_000,
+                streaming_behavior=streaming_behavior,  # type: ignore[arg-type]
+            )
+        )
+        provider.release_first.set()
+        events = await running
+
+        assert [event.type for event in queued] == ["queue_update"]
+        assert len([event for event in events if isinstance(event, ContextCompactionEvent)]) == 1
+        assert len(provider.calls) == 3
+        assert isinstance(provider.calls[2][2][0], UserMessage)
+        assert provider.calls[2][2][-1] == UserMessage(content="queued " + "x" * 4_000)
 
     asyncio.run(scenario())
 

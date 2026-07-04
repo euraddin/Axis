@@ -7,6 +7,7 @@ from axis_agent import (
     AgentStartEvent,
     AgentToolResult,
     AssistantMessage,
+    ContextCompactionEvent,
     ErrorEvent,
     MessageDeltaEvent,
     MessageEndEvent,
@@ -49,6 +50,27 @@ def test_adapter_tracks_run_turn_and_queue_state() -> None:
     adapter.apply(AgentEndEvent())
     assert state.running is False
     assert state.current_turn is None
+
+
+def test_adapter_reports_automatic_context_compaction() -> None:
+    adapter = TuiEventAdapter()
+
+    state = adapter.apply(
+        ContextCompactionEvent(
+            before_tokens=100_000,
+            after_tokens=24_000,
+            trigger_tokens=96_000,
+            compacted_entries=12,
+            retained_entries=4,
+        )
+    )
+
+    assert state.items == [
+        ChatItem(
+            role="status",
+            text="Auto-compacted context (100000 → 24000 tokens; kept 4 entries).",
+        )
+    ]
 
 
 def test_adapter_commits_streamed_assistant_without_duplication() -> None:
