@@ -183,6 +183,16 @@ def build_tool_approval_preview(tool_call: ToolCall, *, cwd: Path) -> ToolApprov
                 f"Command:\n{_bounded_text(command_text)}",
             ),
         )
+    parsed = _parse_mcp_name(tool_call.name)
+    if parsed is not None:
+        server, tool = parsed
+        return ToolApprovalPreview(
+            title=f"Allow MCP {tool}?",
+            summary=f"MCP tool from {server}: {tool}",
+            details=(
+                _bounded_text(json.dumps(arguments, ensure_ascii=False, sort_keys=True, indent=2)),
+            ),
+        )
     return ToolApprovalPreview(
         title=f"Allow {tool_call.name}?",
         summary=f"Tool: {tool_call.name}",
@@ -228,6 +238,18 @@ def _bounded_text(text: str) -> str:
         return text
     omitted = len(text) - PREVIEW_TEXT_LIMIT
     return f"{text[:PREVIEW_TEXT_LIMIT]}\n… [{omitted} characters omitted]"
+
+
+def _parse_mcp_name(name: str) -> tuple[str, str] | None:
+    """Extract (server, tool) from ``mcp:server:tool`` names, or None."""
+    if not name.startswith("mcp:"):
+        return None
+    if name.count(":") != 2:
+        return None
+    parts = name.split(":", 2)
+    if len(parts) != 3 or not parts[1] or not parts[2]:
+        return None
+    return parts[1], parts[2]
 
 
 def _is_interactive(stream: TextIO) -> bool:

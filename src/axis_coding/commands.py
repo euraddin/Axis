@@ -77,6 +77,8 @@ class CommandSession(Protocol):
     @property
     def session_manager(self) -> SessionManager | None: ...
 
+    def mcp_status(self) -> str: ...
+
 
 @dataclass(frozen=True, slots=True)
 class CommandResult:
@@ -356,7 +358,22 @@ def create_default_command_registry() -> CommandRegistry:
             search_terms=("microphone", "dictation", "speech", "asr"),
         )
     )
+    registry.register(
+        SlashCommand(
+            "mcp",
+            "Show MCP server and tool status.",
+            "/mcp",
+            _mcp_command,
+            search_terms=("mcp", "model context protocol"),
+        )
+    )
     return registry
+
+
+def _mcp_command(context: CommandContext) -> CommandResult:
+    if context.args:
+        return CommandResult(handled=True, message="Usage: /mcp")
+    return CommandResult(handled=True, message=context.session.mcp_status())
 
 
 def format_reload_summary(summary: CodingReloadSummary) -> str:

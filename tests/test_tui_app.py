@@ -1403,6 +1403,7 @@ def test_ctrl_k_opens_registry_backed_command_completion(tmp_path: Path) -> None
                 "/hotkeys",
                 "/login",
                 "/logout",
+                "/mcp",
                 "/memory",
                 "/model",
                 "/name",

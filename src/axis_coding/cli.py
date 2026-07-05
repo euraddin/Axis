@@ -14,6 +14,7 @@ from axis_ai import (
 )
 from axis_coding import __version__
 from axis_coding.credentials import FileCredentialStore, credentials_path
+from axis_coding.mcp import load_mcp_config
 from axis_coding.paths import AxisPaths
 from axis_coding.permissions import (
     ToolApprovalPolicy,
@@ -308,6 +309,8 @@ async def run_deepseek_tui_mode(
             model=selected_model,
             provider_name=provider_config.name,
         )
+    resource_paths = AxisResourcePaths(paths=runtime_paths, cwd=record.cwd)
+    mcp_config, _mcp_diags = load_mcp_config(resource_paths, cwd=record.cwd)
     session: CodingSession | None = None
     try:
         session = await CodingSession.load(
@@ -316,7 +319,7 @@ async def run_deepseek_tui_mode(
                 model=record.model or selected_model,
                 storage=JsonlSessionStorage(record.path),
                 cwd=record.cwd,
-                resource_paths=AxisResourcePaths(paths=runtime_paths, cwd=record.cwd),
+                resource_paths=resource_paths,
                 session_id=record.id,
                 session_manager=manager,
                 provider_name=provider_config.name,
@@ -325,6 +328,7 @@ async def run_deepseek_tui_mode(
                 thinking_level=thinking_level,
                 auto_compact_token_threshold=auto_compact_token_threshold,
                 compact_retain_tokens=compact_retain_tokens,
+                mcp_config=mcp_config,
             )
         )
         await run_tui_app(
@@ -417,6 +421,8 @@ async def run_print_mode(
     stderr: TextIO | None = None,
 ) -> bool:
     """Run one persistent session prompt through the selected event renderer."""
+    resolved_paths = resource_paths or AxisResourcePaths(cwd=cwd)
+    mcp_config, _mcp_diags = load_mcp_config(resolved_paths, cwd=cwd)
     session = await CodingSession.load(
         CodingSessionConfig(
             provider=provider,
@@ -436,6 +442,7 @@ async def run_print_mode(
                 stdin=stdin,
                 stderr=stderr,
             ),
+            mcp_config=mcp_config,
         )
     )
     renderer = create_event_renderer(output, stdout=stdout, stderr=stderr)

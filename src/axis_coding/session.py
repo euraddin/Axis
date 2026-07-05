@@ -59,6 +59,7 @@ from axis_coding.context_window import (
     plan_context_retention,
 )
 from axis_coding.credentials import FileCredentialStore, credentials_path
+from axis_coding.mcp import McpConfig, McpManager
 from axis_coding.memory_bank import (
     MEMORY_FILE_TOKEN_BUDGET,
     MEMORY_TOTAL_TOKEN_BUDGET,
@@ -256,6 +257,8 @@ class CodingSessionConfig:
     memory_total_token_budget: int = MEMORY_TOTAL_TOKEN_BUDGET
     memory_file_token_budget: int = MEMORY_FILE_TOKEN_BUDGET
     auto_memory_enabled: bool = True
+    mcp_config: McpConfig | None = None
+    mcp_enabled: bool = True
 
 
 class CodingSession:
@@ -274,6 +277,7 @@ class CodingSession:
         prompt_templates: tuple[PromptTemplate, ...] = (),
         resource_diagnostics: tuple[ResourceDiagnostic, ...] = (),
         pending_initial_entries: tuple[SessionEntry, ...] = (),
+        mcp_manager: McpManager | None = None,
     ) -> None:
         self._config = config
         self._cwd = cwd
@@ -299,6 +303,7 @@ class CodingSession:
         self._active_summarizer: AgentHarness | None = None
         self._summarization_cancelled = False
         self._base_system = harness.config.system
+        self._mcp_manager = mcp_manager
         project_root = resource_paths.project_root or cwd
         self._memory_bank = MemoryBank(
             project_root,
@@ -345,6 +350,19 @@ class CodingSession:
 
         tools = config.tools if config.tools is not None else create_coding_tools(cwd=cwd)
         resource_paths = resource_paths_with_cwd(config.resource_paths, cwd)
+
+        # Load MCP tools and manager
+        mcp_manager: McpManager | None = None
+        mcp_tools: list[AgentTool] = []
+        mcp_diagnostics: tuple[ResourceDiagnostic, ...] = ()
+        if config.mcp_enabled and config.mcp_config is not None and config.mcp_config.servers:
+            mcp_manager = McpManager(config.mcp_config, resource_paths)
+            await mcp_manager.connect_all()
+            discovered = await mcp_manager.discover_tools()
+            mcp_tools = list(discovered)
+            mcp_diagnostics = mcp_manager.diagnostics
+        tools = [*tools, *mcp_tools]
+
         context_files, resource_diagnostics = discover_project_context_with_diagnostics(
             resource_paths
         )
@@ -356,6 +374,7 @@ class CodingSession:
             *resource_diagnostics,
             *skill_diagnostics,
             *prompt_diagnostics,
+            *mcp_diagnostics,
         )
         stored_system = (
             restored_state.session_info.system
@@ -421,6 +440,7 @@ class CodingSession:
             prompt_templates=prompt_templates,
             resource_diagnostics=resource_diagnostics,
             pending_initial_entries=pending_initial_entries,
+            mcp_manager=mcp_manager,
         )
         session._sync_thinking_level_to_active_model()
         if config.runtime_provider_config is not None:
@@ -1518,6 +1538,28 @@ class CodingSession:
             ]
         )
 
+    @property
+    def mcp_manager(self) -> McpManager | None:
+        """Return the MCP manager when MCP is enabled and configured."""
+        return self._mcp_manager
+
+    def mcp_status(self) -> str:
+        """Return a human-readable summary of MCP server and tool state."""
+        manager = self._mcp_manager
+        if manager is None:
+            return "MCP: not configured"
+        if not manager.discovered:
+            return "MCP: not connected"
+        lines = [
+            f"MCP: {manager.server_count} server(s), {manager.tool_count} tool(s)",
+        ]
+        for status in manager.server_statuses:
+            state = "✓" if status.connected else "✗"
+            tools_str = ", ".join(status.tool_names) if status.tool_names else "none"
+            error_suffix = f" — {status.error}" if status.error else ""
+            lines.append(f"  {state} {status.name}: {tools_str}{error_suffix}")
+        return "\n".join(lines)
+
     def initialize_memory(self) -> str:
         if self.is_running:
             raise RuntimeError("Cannot initialize Memory Bank during an active operation")
@@ -1860,6 +1902,7 @@ class CodingSession:
         self._active_memory_generator = None
         self._memory_generation_cancelled = False
         self._command_registry = replacement._command_registry
+        self._mcp_manager = replacement._mcp_manager
 
     def _touch_session(self) -> CodingSessionRecord | None:
         manager = self._config.session_manager
@@ -1872,10 +1915,12 @@ class CodingSession:
         )
 
     async def aclose(self) -> None:
-        """Close provider clients created by model/thinking switches."""
+        """Close provider clients and MCP server connections."""
         for provider in self._owned_providers:
             await provider.aclose()
         self._owned_providers.clear()
+        if self._mcp_manager is not None:
+            await self._mcp_manager.disconnect_all()
 
     async def _ensure_initialized(self) -> None:
         while self._pending_initial_entries:

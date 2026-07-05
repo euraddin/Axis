@@ -65,6 +65,7 @@ def test_default_registry_only_advertises_implemented_commands() -> None:
         "hotkeys",
         "login",
         "logout",
+        "mcp",
         "memory",
         "model",
         "name",
