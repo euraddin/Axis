@@ -65,6 +65,7 @@ def test_default_registry_only_advertises_implemented_commands() -> None:
         "hotkeys",
         "login",
         "logout",
+        "memory",
         "model",
         "name",
         "new",
@@ -201,6 +202,28 @@ def test_session_lifecycle_commands_return_async_application_actions(tmp_path: P
     assert exported.export_format == "jsonl"
     assert exported.export_destination == Path("exports/session.jsonl")
     assert registry.execute(session, "/tree").tree_picker_requested is True  # type: ignore[arg-type]
+
+
+def test_memory_commands_return_validated_async_application_actions(tmp_path: Path) -> None:
+    registry = create_default_command_registry()
+    session = FakeCommandSession(tmp_path)
+
+    assert registry.execute(session, "/memory").memory_request.action == "status"  # type: ignore[union-attr,arg-type]
+    assert registry.execute(session, "/memory init").memory_request.action == "init"  # type: ignore[union-attr,arg-type]
+    review = registry.execute(session, "/memory review proposal-1")  # type: ignore[arg-type]
+    assert review.memory_request is not None
+    assert review.memory_request.argument == "proposal-1"
+    apply = registry.execute(session, "/memory apply proposal-1")  # type: ignore[arg-type]
+    assert apply.memory_request is not None
+    assert apply.memory_request.action == "apply"
+    assert apply.memory_request.argument == "proposal-1"
+    assert registry.execute(session, "/memory apply").message == (  # type: ignore[arg-type]
+        "Usage: /memory apply <value>"
+    )
+    assert registry.execute(session, "/memory status extra").message == (  # type: ignore[arg-type]
+        "Usage: /memory status"
+    )
+    assert registry.execute(session, "/memory unknown").message is not None  # type: ignore[arg-type]
 
 
 def test_resume_and_name_validate_indexed_session_metadata(tmp_path: Path) -> None:

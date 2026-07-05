@@ -456,6 +456,20 @@ class TuiSession(Protocol):
         """Execute one input-bar shell command."""
         ...
 
+    def memory_status(self) -> str: ...
+
+    def initialize_memory(self) -> str: ...
+
+    def review_memory_proposals(self, proposal_id: str | None = None) -> str: ...
+
+    def set_next_memory_task_type(self, value: str) -> str: ...
+
+    async def apply_memory_proposal(self, proposal_id: str) -> str: ...
+
+    async def discard_memory_proposal(self, proposal_id: str) -> str: ...
+
+    async def generate_memory_proposals(self) -> str: ...
+
     def queue_update_event(self) -> AgentEvent:
         """Return the current queued-message snapshot."""
         ...
@@ -1682,6 +1696,11 @@ class AxisTuiApp(App[None]):
                 exclusive=True,
                 exit_on_error=False,
             )
+        if command.memory_request is not None:
+            try:
+                message = await self._run_memory_command(command.memory_request)
+            except Exception as exc:
+                message = f"Could not complete memory command: {exc}"
         if command.export_requested:
             export_session = getattr(self.session, "export", None)
             if callable(export_session):
@@ -1745,6 +1764,35 @@ class AxisTuiApp(App[None]):
         self._render_state()
         if command.exit_requested:
             self.action_exit_app()
+
+    async def _run_memory_command(self, request: object) -> str:
+        action = getattr(request, "action", None)
+        argument = getattr(request, "argument", None)
+        if action == "status":
+            return str(self.session.memory_status())
+        if action == "init":
+            return str(self.session.initialize_memory())
+        if action == "review":
+            return str(
+                self.session.review_memory_proposals(
+                    argument if isinstance(argument, str) else None
+                )
+            )
+        if action == "type":
+            if not isinstance(argument, str):
+                raise ValueError("Memory type is required")
+            return str(self.session.set_next_memory_task_type(argument))
+        if action == "apply":
+            if not isinstance(argument, str):
+                raise ValueError("Memory proposal id is required")
+            return str(await self.session.apply_memory_proposal(argument))
+        if action == "discard":
+            if not isinstance(argument, str):
+                raise ValueError("Memory proposal id is required")
+            return str(await self.session.discard_memory_proposal(argument))
+        if action == "propose":
+            return str(await self.session.generate_memory_proposals())
+        raise ValueError(f"Unknown memory action: {action}")
 
     async def _new_session(self) -> None:
         await self._stop_active_prompt()

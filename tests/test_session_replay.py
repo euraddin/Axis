@@ -11,6 +11,8 @@ from axis_agent import (
     CompactionEntry,
     JsonlSessionStorage,
     LeafEntry,
+    MemoryProposalDecisionEntry,
+    MemoryProposalEntry,
     MessageEntry,
     ModelChangeEntry,
     SessionInfoEntry,
@@ -134,6 +136,37 @@ def test_session_state_replays_full_and_partial_compaction() -> None:
     )
     assert state.context_entry_ids == ("compact", "recent")
     assert state.compaction_entries == (compact,)
+
+
+def test_session_state_tracks_pending_memory_proposals_outside_model_messages() -> None:
+    root = MessageEntry(id="root", message=UserMessage(content="Implement memory"))
+    proposal = MemoryProposalEntry(
+        id="proposal",
+        parent_id="root",
+        task_type="implementation",
+        target_file="progress.md",
+        operation="append",
+        reason="Milestone completed",
+        proposed_content="- Memory implemented.",
+        confidence=0.9,
+        base_sha256="a" * 64,
+    )
+    pending = SessionState.from_entries([root, proposal])
+
+    assert pending.messages == (UserMessage(content="Implement memory"),)
+    assert pending.memory_proposals == (proposal,)
+    assert pending.pending_memory_proposals == (proposal,)
+
+    decision = MemoryProposalDecisionEntry(
+        id="decision",
+        parent_id="proposal",
+        proposal_id="proposal",
+        decision="discarded",
+    )
+    decided = SessionState.from_entries([root, proposal, decision])
+    assert decided.messages == pending.messages
+    assert decided.memory_proposal_decisions == (decision,)
+    assert decided.pending_memory_proposals == ()
 
 
 def test_branch_summary_replaces_earlier_path_context() -> None:

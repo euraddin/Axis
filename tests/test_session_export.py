@@ -8,6 +8,8 @@ from axis_agent import (
     AssistantMessage,
     CompactionEntry,
     LeafEntry,
+    MemoryProposalDecisionEntry,
+    MemoryProposalEntry,
     MessageEntry,
     UserMessage,
 )
@@ -68,6 +70,33 @@ def test_export_writes_html_and_exact_jsonl(tmp_path: Path) -> None:
 
     assert html_path.read_text(encoding="utf-8").startswith("<!doctype html>")
     assert jsonl_path.read_text(encoding="utf-8").count("\n") == len(entries)
+
+
+def test_html_export_includes_memory_proposal_and_decision_audit_facts() -> None:
+    proposal = MemoryProposalEntry(
+        id="proposal",
+        task_type="implementation",
+        target_file="progress.md",
+        operation="append",
+        reason="Milestone complete",
+        proposed_content="- Memory Bank implemented.",
+        confidence=0.9,
+        base_sha256="a" * 64,
+    )
+    decision = MemoryProposalDecisionEntry(
+        id="decision",
+        parent_id="proposal",
+        proposal_id="proposal",
+        decision="applied",
+        audit_path=".agent-memory/history/audit.md",
+    )
+
+    html = render_session_html([proposal, decision], title="Memory", source="session.jsonl")
+
+    assert "memory proposal: progress.md (append)" in html
+    assert "Memory Bank implemented." in html
+    assert "memory proposal applied: proposal" in html
+    assert ".agent-memory/history/audit.md" in html
 
 
 def test_export_format_normalization_is_strict() -> None:

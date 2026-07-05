@@ -9,6 +9,8 @@ from axis_agent import (
     AssistantMessage,
     ContextCompactionEvent,
     ErrorEvent,
+    MemoryContextEvent,
+    MemoryProposalEvent,
     MessageDeltaEvent,
     MessageEndEvent,
     MessageStartEvent,
@@ -70,6 +72,32 @@ def test_adapter_reports_automatic_context_compaction() -> None:
             role="status",
             text="Auto-compacted context (100000 → 24000 tokens; kept 4 entries).",
         )
+    ]
+
+
+def test_adapter_reports_memory_warnings_and_generated_proposals() -> None:
+    adapter = TuiEventAdapter()
+
+    adapter.apply(
+        MemoryContextEvent(
+            task_type="debug",
+            warnings=("pitfalls.md is missing",),
+        )
+    )
+    adapter.apply(
+        MemoryProposalEvent(
+            status="generated",
+            proposal_ids=("proposal-1",),
+            message="Generated 1 memory proposal(s). Run /memory review.",
+        )
+    )
+
+    assert [(item.role, item.text) for item in adapter.state.items] == [
+        ("status", "Memory warning: pitfalls.md is missing"),
+        (
+            "status",
+            "Auto Memory: Generated 1 memory proposal(s). Run /memory review.",
+        ),
     ]
 
 

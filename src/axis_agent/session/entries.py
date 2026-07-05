@@ -66,6 +66,49 @@ class BranchSummaryEntry(BaseSessionEntry):
     branch_root_id: str | None = None
 
 
+type MemoryTargetFile = Literal[
+    "activeContext.md",
+    "progress.md",
+    "decisions.md",
+    "pitfalls.md",
+    "tech.md",
+    "architecture.md",
+    "projectbrief.md",
+    "AGENTS.md suggestion only",
+]
+type MemoryOperation = Literal[
+    "append",
+    "replace_section",
+    "update_checkbox",
+    "suggest_promotion_to_agents_md",
+]
+
+
+class MemoryProposalEntry(BaseSessionEntry):
+    """One reviewable project-memory update proposed by a completed task."""
+
+    type: Literal["memory_proposal"] = "memory_proposal"
+    task_type: str = Field(min_length=1)
+    target_file: MemoryTargetFile
+    operation: MemoryOperation
+    section_heading: str | None = None
+    reason: str = Field(min_length=1, max_length=4_000)
+    proposed_content: str = Field(min_length=1, max_length=16_000)
+    confidence: float = Field(ge=0, le=1)
+    requires_user_approval: Literal[True] = True
+    base_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class MemoryProposalDecisionEntry(BaseSessionEntry):
+    """Append-only record that a memory proposal was applied or discarded."""
+
+    type: Literal["memory_proposal_decision"] = "memory_proposal_decision"
+    proposal_id: str = Field(min_length=1)
+    decision: Literal["applied", "discarded"]
+    audit_path: str | None = None
+    message: str | None = None
+
+
 class LeafEntry(BaseSessionEntry):
     """An append-only pointer to the active session-tree leaf."""
 
@@ -89,6 +132,8 @@ type SessionEntry = Annotated[
     | ThinkingLevelChangeEntry
     | CompactionEntry
     | BranchSummaryEntry
+    | MemoryProposalEntry
+    | MemoryProposalDecisionEntry
     | LeafEntry
     | SessionInfoEntry,
     Field(discriminator="type"),

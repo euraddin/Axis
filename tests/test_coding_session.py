@@ -1125,7 +1125,8 @@ def test_auto_compaction_runs_before_provider_and_preserves_structured_tool_cont
         compacted = next(event for event in events if isinstance(event, ContextCompactionEvent))
         assert compacted.compacted_entries == 4
         assert compacted.retained_entries == 1
-        assert [event.type for event in events[:3]] == [
+        assert [event.type for event in events[:4]] == [
+            "memory_context",
             "agent_start",
             "context_compaction",
             "turn_start",

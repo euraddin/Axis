@@ -797,7 +797,11 @@ def test_run_print_mode_can_emit_json_events(tmp_path: Path) -> None:
 
     events = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert succeeded is True
-    assert events[0] == {"type": "agent_start"}
+    assert events[0]["type"] == "memory_context"
+    assert events[0]["warnings"] == [
+        "Memory Bank is not initialized. Run /memory init to enable it."
+    ]
+    assert events[1] == {"type": "agent_start"}
     assert events[-1] == {"type": "agent_end"}
     assert any(event["type"] == "message_delta" for event in events)
     assert stderr.getvalue() == ""
@@ -831,7 +835,9 @@ def test_run_print_mode_can_emit_live_transcript(tmp_path: Path) -> None:
 
     assert succeeded is True
     assert stdout.getvalue() == "Hello\n"
-    assert stderr.getvalue() == ""
+    assert stderr.getvalue() == (
+        "… Memory warning: Memory Bank is not initialized. Run /memory init to enable it.\n"
+    )
 
 
 def test_run_print_mode_persists_to_injected_storage(tmp_path: Path) -> None:

@@ -146,6 +146,8 @@ TUI 与 print mode 使用同一个 CodingSession、system prompt、工具和 JSO
 
 每次请求 Provider 前，CodingSession 会估算 system、messages 和工具定义的总 token；默认达到模型上下文窗口的 80% 时自动压缩。压缩保留最近约 20K token 的完整用户轮次，把更早内容整理为结构化摘要，原始 JSONL 历史不会删除。可用 `--auto-compact-threshold` 覆盖触发值，用 `--compact-retain-tokens` 调整原文保留窗口。
 
+项目长期记忆使用显式启用的 `.agent-memory/` Markdown 文件。运行 `/memory init` 创建缺失模板；之后每个顶层任务只加载与任务类型相关的文件，并把它们作为低优先级 project memory 注入本次 system context。成功任务可以生成待审 proposal，但不会自动修改文件：先用 `/memory review` 查看 diff，再逐条执行 `/memory apply <id>` 或 `/memory discard <id>`。所有 proposal 和审批决定都会追加到 session JSONL，实际写入另有 `.agent-memory/history/` 审计记录。
+
 ### 上下文感知语音输入
 
 TUI 支持“豆包 Seed ASR 2.0 实时转写 → DeepSeekV4pro 上下文润色 → 编辑器草稿”的语音管线。它不会自动提交，也不会保存音频或未提交的原始转写。

@@ -2,7 +2,12 @@
 
 from collections.abc import Sequence
 
-from axis_agent.session.entries import LeafEntry, SessionEntry
+from axis_agent.session.entries import (
+    LeafEntry,
+    MemoryProposalDecisionEntry,
+    MemoryProposalEntry,
+    SessionEntry,
+)
 
 
 class SessionTreeError(ValueError):
@@ -33,6 +38,12 @@ def validate_session_tree(entries: Sequence[SessionEntry]) -> None:
                 raise SessionTreeError(f"Missing active leaf target: {entry.entry_id}")
             if isinstance(target, LeafEntry):
                 raise SessionTreeError("A LeafEntry cannot target another LeafEntry")
+        if isinstance(entry, MemoryProposalDecisionEntry):
+            proposal = by_id.get(entry.proposal_id)
+            if not isinstance(proposal, MemoryProposalEntry):
+                raise SessionTreeError(
+                    f"Missing memory proposal {entry.proposal_id} for decision {entry.id}"
+                )
 
     _reject_cycles(entries, by_id)
 
@@ -52,6 +63,13 @@ def validate_session_tree(entries: Sequence[SessionEntry]) -> None:
         ):
             raise SessionTreeError(
                 f"Active leaf target {entry.entry_id} must appear before pointer {entry.id}"
+            )
+        if (
+            isinstance(entry, MemoryProposalDecisionEntry)
+            and positions[entry.proposal_id] >= positions[entry.id]
+        ):
+            raise SessionTreeError(
+                f"Memory proposal {entry.proposal_id} must appear before decision {entry.id}"
             )
 
     logical_entries = [entry for entry in entries if not isinstance(entry, LeafEntry)]

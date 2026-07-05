@@ -10,6 +10,8 @@ from axis_agent import (
     AssistantMessage,
     ContextCompactionEvent,
     ErrorEvent,
+    MemoryContextEvent,
+    MemoryProposalEvent,
     MessageDeltaEvent,
     MessageEndEvent,
     MessageStartEvent,
@@ -77,6 +79,16 @@ class TranscriptRenderer:
                 f"({event.before_tokens} → {event.after_tokens} tokens; "
                 f"kept {event.retained_entries} entries).\n"
             )
+            return
+
+        if isinstance(event, MemoryContextEvent):
+            for warning in event.warnings:
+                self._write_stderr(f"… Memory warning: {warning}\n")
+            return
+
+        if isinstance(event, MemoryProposalEvent):
+            prefix = "Memory warning" if event.status == "warning" else "Auto Memory"
+            self._write_stderr(f"… {prefix}: {event.message}\n")
             return
 
         if isinstance(event, ToolExecutionUpdateEvent):

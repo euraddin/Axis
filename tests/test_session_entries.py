@@ -10,6 +10,8 @@ from axis_agent import (
     BranchSummaryEntry,
     CompactionEntry,
     LeafEntry,
+    MemoryProposalDecisionEntry,
+    MemoryProposalEntry,
     MessageEntry,
     ModelChangeEntry,
     SessionInfoEntry,
@@ -160,6 +162,32 @@ def test_context_summary_entries_round_trip(entry: object) -> None:
     line = entry_to_json_line(entry)  # type: ignore[arg-type]
 
     assert entry_from_json_line(line) == entry
+
+
+def test_memory_proposal_entries_round_trip_without_becoming_messages() -> None:
+    proposal = MemoryProposalEntry(
+        id="proposal",
+        parent_id="message",
+        timestamp=2,
+        task_type="implementation",
+        target_file="progress.md",
+        operation="append",
+        reason="A milestone completed",
+        proposed_content="- Memory Bank implemented.",
+        confidence=0.9,
+        base_sha256="a" * 64,
+    )
+    decision = MemoryProposalDecisionEntry(
+        id="decision",
+        parent_id="proposal",
+        timestamp=3,
+        proposal_id="proposal",
+        decision="discarded",
+        message="Discarded by user",
+    )
+
+    assert entry_from_json_line(entry_to_json_line(proposal)) == proposal
+    assert entry_from_json_line(entry_to_json_line(decision)) == decision
 
 
 def test_legacy_session_info_without_system_remains_readable() -> None:

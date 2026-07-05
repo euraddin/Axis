@@ -13,6 +13,8 @@ from axis_agent import (
     BranchSummaryEntry,
     CompactionEntry,
     LeafEntry,
+    MemoryProposalDecisionEntry,
+    MemoryProposalEntry,
     MessageEntry,
     ModelChangeEntry,
     SessionEntry,
@@ -190,6 +192,10 @@ def _entry_label(entry: SessionEntry) -> str:
         return f"compaction: {_preview(entry.summary)}"
     if isinstance(entry, BranchSummaryEntry):
         return f"branch summary: {_preview(entry.summary)}"
+    if isinstance(entry, MemoryProposalEntry):
+        return f"memory proposal: {entry.target_file} ({entry.operation})"
+    if isinstance(entry, MemoryProposalDecisionEntry):
+        return f"memory proposal {entry.decision}: {entry.proposal_id}"
     return entry.type
 
 
@@ -205,6 +211,17 @@ def _entry_body(entry: SessionEntry) -> str:
         return f"{entry.summary}\n\nReplaces entries: {replaced}"
     if isinstance(entry, BranchSummaryEntry):
         return entry.summary
+    if isinstance(entry, MemoryProposalEntry):
+        return (
+            f"target: {entry.target_file}\noperation: {entry.operation}\n"
+            f"confidence: {entry.confidence:.2f}\nreason: {entry.reason}\n\n"
+            f"{entry.proposed_content}"
+        )
+    if isinstance(entry, MemoryProposalDecisionEntry):
+        return (
+            f"proposal: {entry.proposal_id}\ndecision: {entry.decision}\n"
+            f"audit: {entry.audit_path or ''}\nmessage: {entry.message or ''}"
+        )
     if isinstance(entry, ModelChangeEntry):
         return entry.model
     if isinstance(entry, ThinkingLevelChangeEntry):

@@ -9,6 +9,8 @@ from axis_agent.session.entries import (
     BranchSummaryEntry,
     CompactionEntry,
     LeafEntry,
+    MemoryProposalDecisionEntry,
+    MemoryProposalEntry,
     MessageEntry,
     ModelChangeEntry,
     SessionEntry,
@@ -31,6 +33,9 @@ class SessionState:
     active_leaf_id: str | None
     session_info: SessionInfoEntry | None
     compaction_entries: tuple[CompactionEntry, ...]
+    memory_proposals: tuple[MemoryProposalEntry, ...]
+    memory_proposal_decisions: tuple[MemoryProposalDecisionEntry, ...]
+    pending_memory_proposals: tuple[MemoryProposalEntry, ...]
     context_entry_ids: tuple[str, ...]
     entries: tuple[SessionEntry, ...]
 
@@ -80,6 +85,16 @@ class SessionState:
             None,
         )
         replay_entries = full_replay_entries
+        memory_proposals = tuple(
+            entry for entry in full_replay_entries if isinstance(entry, MemoryProposalEntry)
+        )
+        memory_proposal_decisions = tuple(
+            entry for entry in full_replay_entries if isinstance(entry, MemoryProposalDecisionEntry)
+        )
+        decided_proposal_ids = {entry.proposal_id for entry in memory_proposal_decisions}
+        pending_memory_proposals = tuple(
+            entry for entry in memory_proposals if entry.id not in decided_proposal_ids
+        )
         latest_branch_summary_index = _latest_branch_summary_index(replay_entries)
         if latest_branch_summary_index is not None:
             replay_entries = replay_entries[latest_branch_summary_index:]
@@ -111,6 +126,9 @@ class SessionState:
             active_leaf_id=active_leaf_id,
             session_info=session_info,
             compaction_entries=tuple(compaction_entries),
+            memory_proposals=memory_proposals,
+            memory_proposal_decisions=memory_proposal_decisions,
+            pending_memory_proposals=pending_memory_proposals,
             context_entry_ids=tuple(entry_id for entry_id, _message in message_rows),
             entries=tuple(replay_entries),
         )

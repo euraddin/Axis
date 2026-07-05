@@ -180,11 +180,16 @@ def render_request_context_usage(
     parts: tuple[tuple[str, int], ...]
     if isinstance(usage, ContextUsageEstimate):
         label = f"request {turn}" if turn is not None else "agent request"
-        parts = (
-            ("system", usage.system_tokens),
-            ("messages", usage.message_tokens),
-            ("tools", usage.tool_tokens),
+        parts_list = [("system", max(0, usage.system_tokens - usage.project_memory_tokens))]
+        if usage.project_memory_tokens:
+            parts_list.append(("project memory", usage.project_memory_tokens))
+        parts_list.extend(
+            [
+                ("messages", usage.message_tokens),
+                ("tools", usage.tool_tokens),
+            ]
         )
+        parts = tuple(parts_list)
     else:
         label = usage.kind.casefold()
         parts = tuple((part.name, part.estimated_tokens) for part in usage.parts)

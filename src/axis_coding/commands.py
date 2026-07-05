@@ -3,7 +3,7 @@
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol, cast
 
 from axis_agent import AgentTool
 from axis_coding.context import ProjectContextFile
@@ -106,7 +106,14 @@ class CommandResult:
     theme: str | None = None
     voice_setup_requested: bool = False
     voice_status_requested: bool = False
+    memory_request: MemoryCommandRequest | None = None
     message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryCommandRequest:
+    action: Literal["status", "init", "review", "apply", "discard", "propose", "type"]
+    argument: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +213,15 @@ def create_default_command_registry() -> CommandRegistry:
             "Summarize and compact active context.",
             "/compact [instructions]",
             _compact_command,
+        )
+    )
+    registry.register(
+        SlashCommand(
+            "memory",
+            "Initialize, review, or apply project memory.",
+            "/memory [status|init|review|apply|discard|propose|type]",
+            _memory_command,
+            search_terms=("remember", "bank", "proposal"),
         )
     )
     registry.register(
@@ -376,6 +392,34 @@ def _new_command(context: CommandContext) -> CommandResult:
 
 def _compact_command(context: CommandContext) -> CommandResult:
     return CommandResult(handled=True, compact_instructions=context.args)
+
+
+def _memory_command(context: CommandContext) -> CommandResult:
+    parts = context.args.split(maxsplit=1)
+    action = parts[0].casefold() if parts else "status"
+    argument = parts[1].strip() if len(parts) > 1 else None
+    allowed = {"status", "init", "review", "apply", "discard", "propose", "type"}
+    if action not in allowed:
+        return CommandResult(
+            handled=True,
+            message=(
+                "Usage: /memory [status|init|review [id]|apply <id>|discard <id>|"
+                "propose|type <auto|default|planning|debug|architecture|implementation>]"
+            ),
+        )
+    if action in {"apply", "discard", "type"} and not argument:
+        return CommandResult(handled=True, message=f"Usage: /memory {action} <value>")
+    if action in {"status", "init", "propose"} and argument:
+        return CommandResult(handled=True, message=f"Usage: /memory {action}")
+    return CommandResult(
+        handled=True,
+        memory_request=MemoryCommandRequest(
+            action=cast(
+                Literal["status", "init", "review", "apply", "discard", "propose", "type"], action
+            ),
+            argument=argument,
+        ),
+    )
 
 
 def _export_command(context: CommandContext) -> CommandResult:

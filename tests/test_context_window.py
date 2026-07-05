@@ -12,6 +12,7 @@ from axis_coding import (
     ContextUsageEstimate,
     OpenAICompatibleProviderConfig,
     ProviderSettings,
+    context_usage_breakdown,
     create_coding_tools,
     estimate_context_tokens,
     estimate_context_usage,
@@ -120,6 +121,24 @@ def test_context_usage_reports_system_message_and_tool_proportions(tmp_path: Pat
         )
         == usage.total_tokens
     )
+
+
+def test_context_breakdown_separates_project_memory_from_base_system() -> None:
+    usage = estimate_context_usage(
+        system="base system plus project memory",
+        messages=(UserMessage(content="task"),),
+        project_memory_tokens=4,
+    )
+
+    breakdown = context_usage_breakdown(usage)
+
+    assert [(part.name, part.estimated_tokens) for part in breakdown.parts] == [
+        ("system", usage.system_tokens - 4),
+        ("project memory", 4),
+        ("messages", usage.message_tokens),
+        ("tools", 0),
+    ]
+    assert breakdown.total_tokens == usage.total_tokens
 
 
 def test_coding_session_exposes_provider_window_and_display_threshold(

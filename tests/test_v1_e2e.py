@@ -95,7 +95,8 @@ def test_v1_fake_provider_tool_session_persistence_and_restart(tmp_path: Path) -
     events = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert succeeded is True
     assert stderr.getvalue() == ""
-    assert events[0]["type"] == "agent_start"
+    assert events[0]["type"] == "memory_context"
+    assert events[1]["type"] == "agent_start"
     assert events[-1]["type"] == "agent_end"
     assert [event["type"] for event in events].count("turn_start") == 2
     assert [event["type"] for event in events].count("tool_execution_start") == 1

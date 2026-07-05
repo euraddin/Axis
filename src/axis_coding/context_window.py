@@ -21,6 +21,7 @@ class ContextUsageEstimate:
     tool_tokens: int
     message_count: int
     tool_count: int
+    project_memory_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,13 +57,23 @@ class ContextRetentionPlan:
 
 def context_usage_breakdown(usage: ContextUsageEstimate) -> RequestContextBreakdown:
     """Adapt the legacy agent estimate to the generic request representation."""
-    return RequestContextBreakdown(
-        kind="Agent",
-        parts=(
-            RequestContextPart("system", usage.system_tokens),
+    parts = [
+        RequestContextPart(
+            "system",
+            max(0, usage.system_tokens - usage.project_memory_tokens),
+        )
+    ]
+    if usage.project_memory_tokens:
+        parts.append(RequestContextPart("project memory", usage.project_memory_tokens))
+    parts.extend(
+        [
             RequestContextPart("messages", usage.message_tokens),
             RequestContextPart("tools", usage.tool_tokens),
-        ),
+        ]
+    )
+    return RequestContextBreakdown(
+        kind="Agent",
+        parts=tuple(parts),
     )
 
 
@@ -104,6 +115,7 @@ def estimate_context_usage(
     system: str,
     messages: tuple[AgentMessage, ...],
     tools: tuple[AgentTool, ...] = (),
+    project_memory_tokens: int = 0,
 ) -> ContextUsageEstimate:
     """Estimate the system/messages/tools composition of one request."""
     system_tokens = estimate_text_tokens(system)
@@ -116,6 +128,7 @@ def estimate_context_usage(
         tool_tokens=tool_tokens,
         message_count=len(messages),
         tool_count=len(tools),
+        project_memory_tokens=max(0, project_memory_tokens),
     )
 
 

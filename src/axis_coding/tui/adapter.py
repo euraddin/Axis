@@ -6,6 +6,8 @@ from axis_agent import (
     AgentStartEvent,
     ContextCompactionEvent,
     ErrorEvent,
+    MemoryContextEvent,
+    MemoryProposalEvent,
     MessageDeltaEvent,
     MessageEndEvent,
     MessageStartEvent,
@@ -54,6 +56,12 @@ class TuiEventAdapter:
                 f"({event.before_tokens} → {event.after_tokens} tokens; "
                 f"kept {event.retained_entries} entries).",
             )
+        elif isinstance(event, MemoryContextEvent):
+            for warning in event.warnings:
+                self.state.add_item("status", f"Memory warning: {warning}")
+        elif isinstance(event, MemoryProposalEvent):
+            prefix = "Memory warning" if event.status == "warning" else "Auto Memory"
+            self.state.add_item("status", f"{prefix}: {event.message}")
         elif isinstance(event, MessageStartEvent):
             if event.message_role == "assistant":
                 self.state.assistant_buffer = ""

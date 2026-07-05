@@ -397,6 +397,22 @@ def test_request_context_usage_renders_token_ratios() -> None:
         "system 40.0% (400) · messages 35.0% (350) · tools 25.0% (250)"
     )
 
+    with_memory = render_request_context_usage(
+        ContextUsageEstimate(
+            total_tokens=1_000,
+            system_tokens=500,
+            message_tokens=300,
+            tool_tokens=200,
+            message_count=2,
+            tool_count=4,
+            project_memory_tokens=100,
+        )
+    )
+    assert with_memory.plain == (
+        "agent request estimate · total ≈1,000 tokens · system 40.0% (400) · "
+        "project memory 10.0% (100) · messages 30.0% (300) · tools 20.0% (200)"
+    )
+
     voice = render_request_context_usage(
         RequestContextBreakdown(
             "Voice polish",
@@ -519,6 +535,10 @@ def test_tui_runs_initial_positional_prompt_on_mount(tmp_path: Path) -> None:
 
         assert provider.calls[0][2] == [UserMessage(content="explain this repo")]
         assert [(item.role, item.text) for item in app.state.items] == [
+            (
+                "status",
+                "Memory warning: Memory Bank is not initialized. Run /memory init to enable it.",
+            ),
             ("user", "explain this repo"),
             ("assistant", "Repository explained"),
         ]
@@ -807,6 +827,11 @@ def test_tui_submits_and_renders_streamed_thinking_and_markdown(tmp_path: Path) 
             await wait_until(lambda: len(provider.calls) == 1 and not prompt.disabled)
 
             assert [(item.role, item.text) for item in app.state.items] == [
+                (
+                    "status",
+                    "Memory warning: Memory Bank is not initialized. "
+                    "Run /memory init to enable it.",
+                ),
                 ("user", "Hello Axis"),
                 ("thinking", "Inspect first."),
                 ("assistant", "## Done\n\n- one"),
@@ -1378,6 +1403,7 @@ def test_ctrl_k_opens_registry_backed_command_completion(tmp_path: Path) -> None
                 "/hotkeys",
                 "/login",
                 "/logout",
+                "/memory",
                 "/model",
                 "/name",
                 "/new",

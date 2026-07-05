@@ -140,6 +140,11 @@ class AgentHarness:
         if self._current_signal is not None:
             self._current_signal.cancel()
 
+    def abandon_pending_run(self) -> None:
+        """Release a run whose async event iterator was never entered."""
+        if self._running and self._current_signal is None:
+            self._running = False
+
     def steer(self, content: str) -> QueueUpdateEvent:
         """Queue a user message after the current tool batch."""
         return self.steer_message(UserMessage(content=content))

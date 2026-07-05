@@ -81,6 +81,29 @@ class ContextCompactionEvent(BaseModel):
     replays_current_prompt: bool = False
 
 
+class MemoryContextEvent(BaseModel):
+    """Project memory loaded for the next top-level provider task."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["memory_context"] = "memory_context"
+    task_type: str
+    loaded_files: tuple[str, ...] = ()
+    estimated_tokens: int = 0
+    warnings: tuple[str, ...] = ()
+
+
+class MemoryProposalEvent(BaseModel):
+    """Auto Memory generated proposals or reported a non-fatal warning."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["memory_proposal"] = "memory_proposal"
+    status: Literal["generated", "warning"]
+    proposal_ids: tuple[str, ...] = ()
+    message: str
+
+
 class MessageStartEvent(BaseModel):
     """A streamed transcript message has started."""
 
@@ -185,6 +208,8 @@ type AgentEvent = (
     | RetryEvent
     | QueueUpdateEvent
     | ContextCompactionEvent
+    | MemoryContextEvent
+    | MemoryProposalEvent
     | MessageStartEvent
     | MessageDeltaEvent
     | ThinkingDeltaEvent
