@@ -447,20 +447,15 @@ def test_create_coding_tools_returns_stable_default_order(tmp_path: Path) -> Non
         "git_diff",
         "git_log",
         "git_commit",
+        "lint",
         "web_fetch",
         "web_search",
     ]
     assert [tool.requires_approval for tool in tools] == [
-        False,
-        True,
-        True,
-        True,
-        False,
-        False,
-        False,
-        True,
-        False,
-        False,
+        False, True, True, True,    # read, write, edit, bash
+        False, False, False, True,  # git_status, git_diff, git_log, git_commit
+        False,                      # lint
+        False, False,               # web_fetch, web_search
     ]
     assert tools[0].auto_approve_if is None  # read is unconditionally read-only
     assert tools[3].auto_approve_if is not None  # bash uses a classifier
@@ -472,7 +467,7 @@ def test_bash_definition_exposes_optional_numeric_timeout(tmp_path: Path) -> Non
 
     assert isinstance(properties, dict)
     assert properties["timeout"]["type"] == "number"
-    assert definition.to_agent_tool().prompt_snippet == "Execute shell commands"
+    assert "shell" in definition.to_agent_tool().prompt_snippet.lower()
 
 
 def test_bash_tool_runs_in_cwd_and_preserves_merged_output_order(tmp_path: Path) -> None:

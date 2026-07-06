@@ -89,11 +89,12 @@ def create_coding_tools(
     cwd: str | Path | None = None,
     include_web_tools: bool = True,
     include_git_tools: bool = True,
+    include_lint_tool: bool = True,
 ) -> list[AgentTool]:
     """Create Axis's default tools in stable order.
 
     Order: read, write, edit, bash, git_status, git_diff, git_log, git_commit,
-    web_fetch, web_search.
+    lint, web_fetch, web_search.
     """
     root = Path.cwd() if cwd is None else Path(cwd)
     tools: list[AgentTool] = [
@@ -106,6 +107,10 @@ def create_coding_tools(
         from axis_coding.git_tools import create_git_tools
 
         tools.extend(create_git_tools(cwd=root))
+    if include_lint_tool:
+        from axis_coding.lint_tools import create_lint_tool
+
+        tools.append(create_lint_tool(cwd=root))
     if include_web_tools:
         from axis_coding.web_tools import create_web_tools
 
@@ -588,8 +593,56 @@ def _shell_split(command: str) -> list[str]:
     return tokens
 
 
-def create_bash_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinition:
-    """Create the local asynchronous ``bash`` tool."""
+def _sandbox_docker_available() -> bool:
+    """Return True when Docker appears to be installed and reachable."""
+    import shutil
+
+    return shutil.which("docker") is not None
+
+
+def _wrap_sandbox_command(command: str, cwd: Path, image: str) -> str:
+    """Wrap *command* so it runs inside a disposable Docker container.
+
+    The project directory is mounted read-only at the same path.  If Docker
+    is unavailable the original command is returned unchanged so execution
+    continues un-sandboxed.
+    """
+    if not _sandbox_docker_available():
+        return command
+
+    cwd_str = str(cwd).replace("\\", "/")
+    # fmt: off
+    wrapped = (
+        f"docker run --rm "
+        f"--network none "
+        f"--volume {cwd_str}:{cwd_str}:ro "
+        f"--workdir {cwd_str} "
+        f"--memory 512m --cpus 1 "
+        f"{image} "
+        f"sh -c {_escape_shell(command)}"
+    )
+    # fmt: on
+    return wrapped
+
+
+def _escape_shell(command: str) -> str:
+    """Single-quote a shell command for use inside ``sh -c``."""
+    escaped = command.replace("'", "'\"'\"'")
+    return f"'{escaped}'"
+
+
+def create_bash_tool_definition(
+    *,
+    cwd: str | Path | None = None,
+    sandbox_image: str = "python:3.14-slim",
+) -> ToolDefinition:
+    """Create the local asynchronous ``bash`` tool.
+
+    When *sandbox_image* is set and the caller passes ``sandbox=true``, the
+    command is executed inside a Docker container with the working directory
+    mounted read-only.  This is a best-effort safety layer, **not** a
+    hardened security boundary.
+    """
     root = Path.cwd() if cwd is None else Path(cwd)
 
     async def execute(
@@ -598,10 +651,14 @@ def create_bash_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinit
     ) -> AgentToolResult:
         command = _str_arg(arguments, "command")
         timeout = _optional_float_arg(arguments, "timeout")
+        use_sandbox = bool(arguments.get("sandbox"))
         if timeout is not None and timeout <= 0:
             raise ToolInputError("timeout must be greater than 0")
         if signal is not None and signal.is_cancelled():
             raise ToolInputError("Command cancelled")
+
+        if use_sandbox:
+            command = _wrap_sandbox_command(command, root, sandbox_image)
 
         start = monotonic()
         if os.name == "posix":
@@ -687,10 +744,16 @@ def create_bash_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinit
         description=(
             "Execute a shell command in the current working directory. stdout and stderr are "
             f"combined; output keeps the last {DEFAULT_MAX_OUTPUT_LINES} lines or "
-            f"{DEFAULT_MAX_OUTPUT_BYTES // 1024}KB. An optional timeout has no default value."
+            f"{DEFAULT_MAX_OUTPUT_BYTES // 1024}KB. Set sandbox=true to run inside a "
+            "disposable Docker container with the working directory mounted read-only "
+            "(requires Docker). An optional timeout has no default value."
         ),
-        prompt_snippet="Execute shell commands",
-        prompt_guidelines=(),
+        prompt_snippet="Execute shell commands, optionally sandboxed with Docker",
+        prompt_guidelines=(
+            "Use sandbox=true when running untrusted or potentially destructive commands.",
+            "Docker must be installed and running for sandbox mode; it falls back to "
+            "un-sandboxed execution when unavailable.",
+        ),
         input_schema={
             "type": "object",
             "properties": {
@@ -698,6 +761,13 @@ def create_bash_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinit
                 "timeout": {
                     "type": "number",
                     "description": "Optional positive timeout in seconds",
+                },
+                "sandbox": {
+                    "type": "boolean",
+                    "description": (
+                        "Run the command inside a disposable Docker container with "
+                        "the working directory mounted read-only."
+                    ),
                 },
             },
             "required": ["command"],
@@ -708,9 +778,13 @@ def create_bash_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinit
     )
 
 
-def create_bash_tool(*, cwd: str | Path | None = None) -> AgentTool:
+def create_bash_tool(
+    *,
+    cwd: str | Path | None = None,
+    sandbox_image: str = "python:3.14-slim",
+) -> AgentTool:
     """Create the provider-neutral local ``bash`` tool."""
-    return create_bash_tool_definition(cwd=cwd).to_agent_tool()
+    return create_bash_tool_definition(cwd=cwd, sandbox_image=sandbox_image).to_agent_tool()
 
 
 def truncate_head(

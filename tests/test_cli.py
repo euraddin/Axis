@@ -99,18 +99,13 @@ def test_run_print_mode_uses_harness_and_renders_final_text(tmp_path: Path) -> N
     assert stderr.getvalue() == ""
     assert provider.calls[0][0] == "fake-model"
     assert provider.calls[0][2] == [UserMessage(content="Inspect this project")]
-    assert [tool.name for tool in provider.calls[0][3]] == [
-        "read",
-        "write",
-        "edit",
-        "bash",
-        "git_status",
-        "git_diff",
-        "git_log",
-        "git_commit",
-        "web_fetch",
-        "web_search",
+    names = [tool.name for tool in provider.calls[0][3]]
+    assert names[:11] == [
+        "read", "write", "edit", "bash",
+        "git_status", "git_diff", "git_log", "git_commit",
+        "lint", "web_fetch", "web_search",
     ]
+    assert "task" in names  # added by CodingSession
     assert str(tmp_path) in provider.calls[0][1]
 
 

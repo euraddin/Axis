@@ -363,6 +363,31 @@ class CodingSession:
             mcp_diagnostics = mcp_manager.diagnostics
         tools = [*tools, *mcp_tools]
 
+        # Add the task (sub-agent delegation) tool — needs the live provider.
+        if config.tools is None:
+            from axis_coding.task_tool import create_task_tool
+
+            task_subagent_tools: list[AgentTool] = []
+            for tool in tools:
+                if tool.name in {
+                    "read",
+                    "git_status",
+                    "git_diff",
+                    "git_log",
+                    "web_search",
+                    "web_fetch",
+                }:
+                    task_subagent_tools.append(tool)
+            if task_subagent_tools:
+                tools.append(
+                    create_task_tool(
+                        provider=config.provider,
+                        model=config.model,
+                        cwd=cwd,
+                        subagent_tools=task_subagent_tools,
+                    )
+                )
+
         context_files, resource_diagnostics = discover_project_context_with_diagnostics(
             resource_paths
         )
