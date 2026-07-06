@@ -6,6 +6,7 @@ from io import StringIO
 from pathlib import Path
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from axis_agent import (
@@ -220,10 +221,11 @@ def test_cli_shows_version_without_provider_configuration() -> None:
 
 def test_cli_help_is_available_without_provider_configuration() -> None:
     result = runner.invoke(app, ["--help"], env={"NO_COLOR": "1"})
+    output = unstyle(result.stdout)
 
     assert result.exit_code == 0
-    assert "Axis personal coding agent" in result.stdout
-    assert "--prompt" in result.stdout
+    assert "Axis personal coding agent" in output
+    assert "--prompt" in output
 
 
 def test_cli_without_prompt_launches_tui(
