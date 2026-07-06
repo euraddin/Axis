@@ -36,11 +36,13 @@ class TestRuffOutputParsing:
         assert parsed["errors"][0]["col"] == "5"  # type: ignore[index]
 
     def test_parses_multiple_errors(self) -> None:
-        output = "\n".join([
-            "src/a.py:1:1: F401 unused import",
-            "src/b.py:2:3: E501 line too long",
-            "",
-        ])
+        output = "\n".join(
+            [
+                "src/a.py:1:1: F401 unused import",
+                "src/b.py:2:3: E501 line too long",
+                "",
+            ]
+        )
         parsed = _parse_ruff_output(output)
         assert parsed["total_errors"] == 2
 
@@ -74,10 +76,7 @@ class TestLintTool:
     def test_reports_lint_errors(self, tmp_path: Path) -> None:
         # Create a pyproject.toml so ruff is detected, plus a file with a clear
         # lint violation (unused import F401).
-        (tmp_path / "pyproject.toml").write_text(
-            "[tool.ruff]\n"
-            "[tool.ruff.lint]\nselect = [\"F\"]\n"
-        )
+        (tmp_path / "pyproject.toml").write_text('[tool.ruff]\n[tool.ruff.lint]\nselect = ["F"]\n')
         # Also create a minimal ruff config via a setup.cfg-style file to
         # ensure ruff treats this directory as a project.
         (tmp_path / "bad.py").write_text("import os  # noqa\n")
@@ -95,10 +94,7 @@ class TestLintTool:
     def test_lint_output_parsing_end_to_end(self, tmp_path: Path) -> None:
         """The lint tool should run successfully on a clean project and return
         structured data with zero errors."""
-        (tmp_path / "pyproject.toml").write_text(
-            "[tool.ruff]\n"
-            "[tool.ruff.lint]\nselect = [\"F\"]\n"
-        )
+        (tmp_path / "pyproject.toml").write_text('[tool.ruff]\n[tool.ruff.lint]\nselect = ["F"]\n')
         (tmp_path / "clean.py").write_text("x = 1\n")
 
         async def run() -> None:
@@ -125,8 +121,11 @@ class TestLintTool:
 
     def test_not_found_linter(self, tmp_path: Path) -> None:
         """When the detected linter is not installed, returns an error result."""
-        with patch("axis_coding.lint_tools._detect_python_linter",
-                   return_value=("nonexistent-linter-xyz", [])):
+        with patch(
+            "axis_coding.lint_tools._detect_python_linter",
+            return_value=("nonexistent-linter-xyz", []),
+        ):
+
             async def run() -> None:
                 tool = create_lint_tool(cwd=tmp_path)
                 result = await tool.execute({})

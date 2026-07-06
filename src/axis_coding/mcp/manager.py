@@ -127,9 +127,7 @@ class McpManager:
                     )
                 )
 
-        tasks = [
-            asyncio.create_task(connect_one(name, cfg)) for name, cfg in enabled.items()
-        ]
+        tasks = [asyncio.create_task(connect_one(name, cfg)) for name, cfg in enabled.items()]
         if tasks:
             await asyncio.gather(*tasks)
 
@@ -201,9 +199,7 @@ class McpManager:
 
     async def disconnect_all(self) -> None:
         """Disconnect all servers concurrently."""
-        tasks = [
-            asyncio.create_task(client.disconnect()) for client in self._clients.values()
-        ]
+        tasks = [asyncio.create_task(client.disconnect()) for client in self._clients.values()]
         if tasks:
             await asyncio.gather(*tasks)
         self._clients.clear()

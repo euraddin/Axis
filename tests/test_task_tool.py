@@ -16,15 +16,19 @@ from axis_coding.task_tool import TaskToolError, create_task_tool
 class TestTaskTool:
     @pytest.fixture
     def provider(self) -> FakeProvider:
-        return FakeProvider([
-            [ProviderResponseEndEvent(message=AssistantMessage(content="Investigation complete."))]
-        ])
+        return FakeProvider(
+            [
+                [
+                    ProviderResponseEndEvent(
+                        message=AssistantMessage(content="Investigation complete.")
+                    )
+                ]
+            ]
+        )
 
     def test_returns_subagent_response(self, provider: FakeProvider, tmp_path: Path) -> None:
         async def run() -> None:
-            tool = create_task_tool(
-                provider=provider, model="test", cwd=tmp_path
-            )
+            tool = create_task_tool(provider=provider, model="test", cwd=tmp_path)
             result = await tool.execute({"prompt": "Check the project structure"})
             assert result.ok is True
             assert "Investigation complete" in result.content
@@ -33,9 +37,7 @@ class TestTaskTool:
 
     def test_rejects_empty_prompt(self, provider: FakeProvider, tmp_path: Path) -> None:
         async def run() -> None:
-            tool = create_task_tool(
-                provider=provider, model="test", cwd=tmp_path
-            )
+            tool = create_task_tool(provider=provider, model="test", cwd=tmp_path)
             result = await tool.execute({"prompt": ""})
             assert result.ok is False
             assert "empty" in result.content.lower()
@@ -44,9 +46,7 @@ class TestTaskTool:
 
     def test_rejects_whitespace_prompt(self, provider: FakeProvider, tmp_path: Path) -> None:
         async def run() -> None:
-            tool = create_task_tool(
-                provider=provider, model="test", cwd=tmp_path
-            )
+            tool = create_task_tool(provider=provider, model="test", cwd=tmp_path)
             result = await tool.execute({"prompt": "   "})
             assert result.ok is False
             assert "empty" in result.content.lower()
@@ -55,9 +55,7 @@ class TestTaskTool:
 
     def test_accepts_max_turns(self, provider: FakeProvider, tmp_path: Path) -> None:
         async def run() -> None:
-            tool = create_task_tool(
-                provider=provider, model="test", cwd=tmp_path
-            )
+            tool = create_task_tool(provider=provider, model="test", cwd=tmp_path)
             result = await tool.execute({"prompt": "Check", "max_turns": 3})
             assert result.ok is True
 
@@ -65,9 +63,7 @@ class TestTaskTool:
 
     def test_missing_prompt_raises(self, provider: FakeProvider, tmp_path: Path) -> None:
         async def run() -> None:
-            tool = create_task_tool(
-                provider=provider, model="test", cwd=tmp_path
-            )
+            tool = create_task_tool(provider=provider, model="test", cwd=tmp_path)
             with pytest.raises(TaskToolError, match="prompt must be a string"):
                 await tool.execute({})
 
@@ -75,9 +71,7 @@ class TestTaskTool:
 
     def test_bool_max_turns_raises(self, provider: FakeProvider, tmp_path: Path) -> None:
         async def run() -> None:
-            tool = create_task_tool(
-                provider=provider, model="test", cwd=tmp_path
-            )
+            tool = create_task_tool(provider=provider, model="test", cwd=tmp_path)
             with pytest.raises(TaskToolError, match="integer"):
                 await tool.execute({"prompt": "Check", "max_turns": True})
 
@@ -102,9 +96,9 @@ class TestTaskTool:
 
 class TestTaskToolCustomTools:
     def test_custom_subagent_tools(self, tmp_path: Path) -> None:
-        provider = FakeProvider([
-            [ProviderResponseEndEvent(message=AssistantMessage(content="ok"))]
-        ])
+        provider = FakeProvider(
+            [[ProviderResponseEndEvent(message=AssistantMessage(content="ok"))]]
+        )
         from axis_coding.tools import create_read_tool
 
         sub_tools = [create_read_tool(cwd=tmp_path)]

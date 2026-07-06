@@ -41,9 +41,7 @@ def git_repo(tmp_path: Path) -> Path:
 
 def _run_git(*args: str, cwd: Path) -> str:
     """Run git synchronously (for test fixtures) and return stdout."""
-    result = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
-    )
+    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
     return result.stdout.strip()
 
 
@@ -142,8 +140,7 @@ class TestGitStatusTool:
             assert result.ok is True
             assert "main" in result.content
             assert (
-                "clean" in result.content.lower()
-                or "nothing to commit" in result.content.lower()
+                "clean" in result.content.lower() or "nothing to commit" in result.content.lower()
             )
             assert result.data is not None
             assert result.data["clean"] is True

@@ -127,8 +127,7 @@ class TestHTMLToText:
 
     def test_removes_style_tags_and_content(self) -> None:
         html = (
-            "<html><head><style>body { color: red; }"
-            "</style></head><body><p>Text</p></body></html>"
+            "<html><head><style>body { color: red; }</style></head><body><p>Text</p></body></html>"
         )
         text = html_to_text(html)
         assert "Text" in text

@@ -397,57 +397,164 @@ def create_edit_tool(*, cwd: str | Path | None = None) -> AgentTool:
 # Bash command safety classifier for auto-approval
 # ---------------------------------------------------------------------------
 
-_READ_ONLY_COMMANDS: frozenset[str] = frozenset({
-    # File inspection
-    "ls", "dir", "cat", "head", "tail", "more", "less", "zcat", "zless",
-    "nl", "od", "hexdump", "xxd", "strings",
-    # Search / discovery
-    "grep", "egrep", "fgrep", "rg", "ag", "ack",
-    "find", "locate", "which", "whereis", "whence", "type",
-    # Metadata / counting
-    "wc", "stat", "file", "du", "df",
-    # Output-only
-    "echo", "printf", "pwd", "whoami", "who", "id", "groups",
-    "date", "cal", "uptime", "hostname", "uname", "arch",
-    "env", "printenv", "locale",
-    # Process inspection
-    "ps", "pgrep", "pidof", "pstree", "top", "htop",
-    # Text processing (read-only)
-    "sort", "uniq", "cut", "paste", "join", "tr",
-    "expand", "unexpand",
-    # Comparison
-    "diff", "cmp", "comm", "sdiff",
-    # Help / documentation
-    "man", "info", "whatis", "apropos", "help",
-    # Path utilities
-    "tree", "realpath", "readlink", "dirname", "basename",
-})
-
-_READ_ONLY_GIT_SUBCOMMANDS: frozenset[str] = frozenset({
-    "log", "show", "diff", "status", "blame",
-    "rev-parse", "rev-list", "ls-files", "ls-tree", "describe",
-    "branch", "tag", "remote", "stash", "config",
-    "shortlog", "whatchanged", "reflog",
-})
-
-_READ_ONLY_DOCKER_SUBCOMMANDS: frozenset[str] = frozenset({
-    "ps", "images", "inspect", "logs", "stats",
-    "version", "info", "history", "top",
-})
-
-_READ_ONLY_KUBECTL_SUBCOMMANDS: frozenset[str] = frozenset({
-    "get", "describe", "logs", "explain", "top",
-    "api-resources", "api-versions", "cluster-info",
-    "config view", "version", "auth can-i",
-})
-
-_DESTRUCTIVE_PATTERNS: tuple[str, ...] = (
-    ">", ">>", "| tee ", "|tee ",
+_READ_ONLY_COMMANDS: frozenset[str] = frozenset(
+    {
+        # File inspection
+        "ls",
+        "dir",
+        "cat",
+        "head",
+        "tail",
+        "more",
+        "less",
+        "zcat",
+        "zless",
+        "nl",
+        "od",
+        "hexdump",
+        "xxd",
+        "strings",
+        # Search / discovery
+        "grep",
+        "egrep",
+        "fgrep",
+        "rg",
+        "ag",
+        "ack",
+        "find",
+        "locate",
+        "which",
+        "whereis",
+        "whence",
+        "type",
+        # Metadata / counting
+        "wc",
+        "stat",
+        "file",
+        "du",
+        "df",
+        # Output-only
+        "echo",
+        "printf",
+        "pwd",
+        "whoami",
+        "who",
+        "id",
+        "groups",
+        "date",
+        "cal",
+        "uptime",
+        "hostname",
+        "uname",
+        "arch",
+        "env",
+        "printenv",
+        "locale",
+        # Process inspection
+        "ps",
+        "pgrep",
+        "pidof",
+        "pstree",
+        "top",
+        "htop",
+        # Text processing (read-only)
+        "sort",
+        "uniq",
+        "cut",
+        "paste",
+        "join",
+        "tr",
+        "expand",
+        "unexpand",
+        # Comparison
+        "diff",
+        "cmp",
+        "comm",
+        "sdiff",
+        # Help / documentation
+        "man",
+        "info",
+        "whatis",
+        "apropos",
+        "help",
+        # Path utilities
+        "tree",
+        "realpath",
+        "readlink",
+        "dirname",
+        "basename",
+    }
 )
 
-_MULTI_COMMAND_GIT = frozenset({
-    "branch", "tag", "remote", "stash", "config",
-})
+_READ_ONLY_GIT_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "log",
+        "show",
+        "diff",
+        "status",
+        "blame",
+        "rev-parse",
+        "rev-list",
+        "ls-files",
+        "ls-tree",
+        "describe",
+        "branch",
+        "tag",
+        "remote",
+        "stash",
+        "config",
+        "shortlog",
+        "whatchanged",
+        "reflog",
+    }
+)
+
+_READ_ONLY_DOCKER_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "ps",
+        "images",
+        "inspect",
+        "logs",
+        "stats",
+        "version",
+        "info",
+        "history",
+        "top",
+    }
+)
+
+_READ_ONLY_KUBECTL_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "get",
+        "describe",
+        "logs",
+        "explain",
+        "top",
+        "api-resources",
+        "api-versions",
+        "cluster-info",
+        "config view",
+        "version",
+        "auth can-i",
+    }
+)
+
+_DESTRUCTIVE_PATTERNS: tuple[str, ...] = (
+    ">",
+    ">>",
+    "| tee ",
+    "|tee ",
+)
+
+_MULTI_COMMAND_GIT = frozenset(
+    {
+        "branch",
+        "tag",
+        "remote",
+        "stash",
+        "config",
+    }
+)
 
 _MULTI_READ_ONLY_SUBCOMMANDS: dict[str, frozenset[str]] = {
     "pip": frozenset({"list", "show", "freeze", "config", "cache list"}),
@@ -509,8 +616,16 @@ def _bash_command_is_read_only(arguments: Mapping[str, JSONValue]) -> bool:
                 if subcommand == "remote":
                     return subsub in {None, "-v", "--verbose", "show"}
                 if subcommand == "config":
-                    return subsub in {None, "--list", "--get", "--get-regexp", "-l",
-                                      "--global", "--local", "--system"}
+                    return subsub in {
+                        None,
+                        "--list",
+                        "--get",
+                        "--get-regexp",
+                        "-l",
+                        "--global",
+                        "--local",
+                        "--system",
+                    }
             return True
         return False
 

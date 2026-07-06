@@ -197,27 +197,28 @@ class TaskToolDefinition:
         "reading and analysis only.",
         "After the sub-agent returns, verify critical findings before acting on them.",
     )
-    input_schema: Mapping[str, JSONValue] = field(default_factory=lambda: {
-        "type": "object",
-        "properties": {
-            "prompt": {
-                "type": "string",
-                "description": (
-                    "The task for the sub-agent to investigate. Be specific "
-                    "and include relevant context (file paths, search terms, etc.)."
-                ),
+    input_schema: Mapping[str, JSONValue] = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "The task for the sub-agent to investigate. Be specific "
+                        "and include relevant context (file paths, search terms, etc.)."
+                    ),
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "description": (
+                        f"Maximum tool-calling turns (default {DEFAULT_TASK_MAX_TURNS}, max 30)."
+                    ),
+                },
             },
-            "max_turns": {
-                "type": "integer",
-                "description": (
-                    f"Maximum tool-calling turns (default {DEFAULT_TASK_MAX_TURNS}, "
-                    "max 30)."
-                ),
-            },
-        },
-        "required": ["prompt"],
-        "additionalProperties": False,
-    })
+            "required": ["prompt"],
+            "additionalProperties": False,
+        }
+    )
     requires_approval: bool = False
 
     def to_agent_tool(

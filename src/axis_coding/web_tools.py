@@ -199,9 +199,7 @@ def _basic_html_strip(html: str) -> str:
     """Strip HTML tags and return bare text."""
     # Remove script and style sections
     for tag in ("script", "style", "noscript", "head"):
-        html = re.sub(
-            rf"<{tag}[^>]*>.*?</{tag}>", "", html, flags=re.DOTALL | re.IGNORECASE
-        )
+        html = re.sub(rf"<{tag}[^>]*>.*?</{tag}>", "", html, flags=re.DOTALL | re.IGNORECASE)
     # Remove remaining tags
     text = re.sub(r"<[^>]+>", " ", html)
     # Decode common entities
@@ -222,9 +220,7 @@ def _basic_html_strip(html: str) -> str:
 def _resolve_hostname(hostname: str) -> str:
     """Resolve a hostname and return the first IP address string."""
     try:
-        infos = socket.getaddrinfo(
-            hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM
-        )
+        infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
     except socket.gaierror as exc:
         raise WebToolError(f"Cannot resolve hostname: {hostname}") from exc
 
@@ -362,12 +358,12 @@ async def _fetch_url(
         if "charset=" in content_type:
             try:
                 charset = content_type.split("charset=")[-1].split(";")[0].strip()
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 charset = "utf-8"
 
         try:
             decoded = raw.decode(charset, errors="replace")
-        except (LookupError, UnicodeDecodeError):
+        except LookupError, UnicodeDecodeError:
             decoded = raw.decode("utf-8", errors="replace")
 
         # Convert HTML to readable text, otherwise use raw text.
@@ -389,9 +385,7 @@ async def _fetch_url(
                 f"Response body was truncated to {max_bytes / (1024 * 1024):.1f}MB."
             )
         if truncated_text:
-            suffix_parts.append(
-                f"Text content was truncated to {max_content_length:,} characters."
-            )
+            suffix_parts.append(f"Text content was truncated to {max_content_length:,} characters.")
         if suffix_parts:
             output += "\n\n" + " ".join(suffix_parts)
 
@@ -427,23 +421,24 @@ class WebFetchToolDefinition:
     )
     prompt_snippet: str = "Fetch web page content and convert to readable text"
     prompt_guidelines: tuple[str, ...] = (
-        "Use web_fetch to read documentation, API references, and articles instead of "
-        "guessing.",
+        "Use web_fetch to read documentation, API references, and articles instead of guessing.",
         "When web_fetch returns an error, diagnose it and try a different URL or approach.",
         "Web_fetch content may be truncated; use bash with curl for binary or very large "
         "resources.",
     )
-    input_schema: Mapping[str, JSONValue] = field(default_factory=lambda: {
-        "type": "object",
-        "properties": {
-            "url": {
-                "type": "string",
-                "description": "The URL to fetch. Must use http or https scheme.",
+    input_schema: Mapping[str, JSONValue] = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The URL to fetch. Must use http or https scheme.",
+                },
             },
-        },
-        "required": ["url"],
-        "additionalProperties": False,
-    })
+            "required": ["url"],
+            "additionalProperties": False,
+        }
+    )
     executor: ToolExecutor | None = field(default=None, compare=False, hash=False)
     requires_approval: bool = False
 
@@ -479,9 +474,9 @@ def create_web_fetch_tool(
     client: httpx.AsyncClient | None = None,
 ) -> AgentTool:
     """Create the ``web_fetch`` tool with a shared HTTP client."""
-    return WebFetchToolDefinition().with_executor(
-        client=client or httpx.AsyncClient()
-    ).to_agent_tool()
+    return (
+        WebFetchToolDefinition().with_executor(client=client or httpx.AsyncClient()).to_agent_tool()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -670,21 +665,25 @@ class WebSearchToolDefinition:
         "Craft search queries with specific keywords, version numbers, and error "
         "messages for better results.",
     )
-    input_schema: Mapping[str, JSONValue] = field(default_factory=lambda: {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "The search query. Be specific with keywords and versions.",
+    input_schema: Mapping[str, JSONValue] = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query. Be specific with keywords and versions.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": (
+                        f"Maximum results to return (default {DEFAULT_SEARCH_MAX_RESULTS})."
+                    ),
+                },
             },
-            "max_results": {
-                "type": "integer",
-                "description": f"Maximum results to return (default {DEFAULT_SEARCH_MAX_RESULTS}).",
-            },
-        },
-        "required": ["query"],
-        "additionalProperties": False,
-    })
+            "required": ["query"],
+            "additionalProperties": False,
+        }
+    )
     requires_approval: bool = False
 
     def to_agent_tool(self) -> AgentTool:

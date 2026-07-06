@@ -501,9 +501,7 @@ def test_loop_auto_approves_read_only_bash_without_emitting_approval_events() ->
         return "allow_once"
 
     read_only = ToolCall(id="call-find", name="bash", arguments={"command": "find . -name '*.py'"})
-    destructive = ToolCall(
-        id="call-rm", name="bash", arguments={"command": "rm -rf /tmp/test"}
-    )
+    destructive = ToolCall(id="call-rm", name="bash", arguments={"command": "rm -rf /tmp/test"})
     provider = FakeProvider(
         [
             [

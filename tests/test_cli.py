@@ -101,9 +101,17 @@ def test_run_print_mode_uses_harness_and_renders_final_text(tmp_path: Path) -> N
     assert provider.calls[0][2] == [UserMessage(content="Inspect this project")]
     names = [tool.name for tool in provider.calls[0][3]]
     assert names[:11] == [
-        "read", "write", "edit", "bash",
-        "git_status", "git_diff", "git_log", "git_commit",
-        "lint", "web_fetch", "web_search",
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_commit",
+        "lint",
+        "web_fetch",
+        "web_search",
     ]
     assert "task" in names  # added by CodingSession
     assert str(tmp_path) in provider.calls[0][1]
@@ -211,7 +219,7 @@ def test_cli_shows_version_without_provider_configuration() -> None:
 
 
 def test_cli_help_is_available_without_provider_configuration() -> None:
-    result = runner.invoke(app, ["--help"], env={})
+    result = runner.invoke(app, ["--help"], env={"NO_COLOR": "1"})
 
     assert result.exit_code == 0
     assert "Axis personal coding agent" in result.stdout

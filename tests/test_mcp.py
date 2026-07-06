@@ -126,13 +126,7 @@ class TestLoadMcpConfig:
             home.mkdir()
             mcp_json = home / MCP_CONFIG_FILENAME
             mcp_json.write_text(
-                json.dumps(
-                    {
-                        "servers": {
-                            "test": {"command": "echo", "args": ["hello"]}
-                        }
-                    }
-                ),
+                json.dumps({"servers": {"test": {"command": "echo", "args": ["hello"]}}}),
                 encoding="utf-8",
             )
             paths = AxisResourcePaths(paths=AxisPaths(home=home, agents_home=home))
@@ -264,9 +258,7 @@ class TestMcpManager:
         async def run() -> None:
             config = McpConfig(
                 servers={
-                    "disabled_one": McpServerConfig(
-                        command="echo", args=["test"], enabled=False
-                    )
+                    "disabled_one": McpServerConfig(command="echo", args=["test"], enabled=False)
                 }
             )
             manager = McpManager(config)
@@ -281,9 +273,7 @@ class TestMcpManager:
     def test_connect_all_handles_invalid_command(self) -> None:
         async def run() -> None:
             config = McpConfig(
-                servers={
-                    "bad": McpServerConfig(command="/nonexistent/path/to/binary_12345")
-                }
+                servers={"bad": McpServerConfig(command="/nonexistent/path/to/binary_12345")}
             )
             manager = McpManager(config)
             await manager.connect_all()

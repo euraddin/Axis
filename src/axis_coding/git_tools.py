@@ -68,9 +68,7 @@ async def _git(
         )
 
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            process.communicate(), timeout=timeout
-        )
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=timeout)
     except TimeoutError:
         with contextlib.suppress(ProcessLookupError):
             process.kill()
@@ -337,11 +335,13 @@ class GitStatusToolDefinition:
         "Use git_status to inspect the state of the working tree before committing.",
         "Prefer git_status over shelling out to git status for structured output.",
     )
-    input_schema: Mapping[str, JSONValue] = field(default_factory=lambda: {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    })
+    input_schema: Mapping[str, JSONValue] = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+    )
     requires_approval: bool = False
 
     def to_agent_tool(self, *, cwd: Path) -> AgentTool:
@@ -394,9 +394,7 @@ async def _execute_git_diff(
         return result
 
     # Add a stats summary line.
-    stats_result = await _git(
-        "diff", "--stat", *(["--staged"] if staged else []), cwd=cwd
-    )
+    stats_result = await _git("diff", "--stat", *(["--staged"] if staged else []), cwd=cwd)
     stats_text = ""
     if stats_result.ok and stats_result.content != "(no output)":
         stats_text = f"\n\n## Stats\n\n```text\n{stats_result.content}\n```"
@@ -436,20 +434,22 @@ class GitDiffToolDefinition:
         "Use git_diff to review changes before committing them.",
         "Check git_diff with staged=true to see what will be committed.",
     )
-    input_schema: Mapping[str, JSONValue] = field(default_factory=lambda: {
-        "type": "object",
-        "properties": {
-            "staged": {
-                "type": "boolean",
-                "description": "Show staged changes instead of working-tree changes.",
+    input_schema: Mapping[str, JSONValue] = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "staged": {
+                    "type": "boolean",
+                    "description": "Show staged changes instead of working-tree changes.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Limit the diff to a specific file or directory.",
+                },
             },
-            "path": {
-                "type": "string",
-                "description": "Limit the diff to a specific file or directory.",
-            },
-        },
-        "additionalProperties": False,
-    })
+            "additionalProperties": False,
+        }
+    )
     requires_approval: bool = False
 
     def to_agent_tool(self, *, cwd: Path) -> AgentTool:
@@ -486,9 +486,7 @@ async def _execute_git_log(
     *,
     cwd: Path,
 ) -> AgentToolResult:
-    max_count = _optional_int_arg(
-        arguments, "max_count", min_value=1
-    ) or DEFAULT_LOG_COUNT
+    max_count = _optional_int_arg(arguments, "max_count", min_value=1) or DEFAULT_LOG_COUNT
     max_count = min(max_count, DEFAULT_LOG_MAX_COUNT)
     path = _optional_str_arg(arguments, "path")
 
@@ -546,23 +544,25 @@ class GitLogToolDefinition:
         "Use git_log to understand recent changes and project direction.",
         "Use git_log with a path to see the history of a specific file.",
     )
-    input_schema: Mapping[str, JSONValue] = field(default_factory=lambda: {
-        "type": "object",
-        "properties": {
-            "max_count": {
-                "type": "integer",
-                "description": (
-                    f"Maximum number of commits (default {DEFAULT_LOG_COUNT}, "
-                    f"max {DEFAULT_LOG_MAX_COUNT})."
-                ),
+    input_schema: Mapping[str, JSONValue] = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "max_count": {
+                    "type": "integer",
+                    "description": (
+                        f"Maximum number of commits (default {DEFAULT_LOG_COUNT}, "
+                        f"max {DEFAULT_LOG_MAX_COUNT})."
+                    ),
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Limit to commits affecting this file or directory.",
+                },
             },
-            "path": {
-                "type": "string",
-                "description": "Limit to commits affecting this file or directory.",
-            },
-        },
-        "additionalProperties": False,
-    })
+            "additionalProperties": False,
+        }
+    )
     requires_approval: bool = False
 
     def to_agent_tool(self, *, cwd: Path) -> AgentTool:
@@ -655,8 +655,7 @@ async def _execute_git_commit(
         content=(
             f"# Commit Created\n\n"
             f"**Commit:** `{commit_hash or 'unknown'}`\n"
-            f"**Message:** {message.strip()}\n\n"
-            + f"```text\n{result.content}\n```"
+            f"**Message:** {message.strip()}\n\n" + f"```text\n{result.content}\n```"
         ),
         data=result_data,
     )
@@ -680,17 +679,19 @@ class GitCommitToolDefinition:
         "Review staged changes with git_diff(staged=true) before committing.",
         "Make small, focused commits — one logical change per commit.",
     )
-    input_schema: Mapping[str, JSONValue] = field(default_factory=lambda: {
-        "type": "object",
-        "properties": {
-            "message": {
-                "type": "string",
-                "description": "Commit message in imperative mood.",
+    input_schema: Mapping[str, JSONValue] = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "Commit message in imperative mood.",
+                },
             },
-        },
-        "required": ["message"],
-        "additionalProperties": False,
-    })
+            "required": ["message"],
+            "additionalProperties": False,
+        }
+    )
     requires_approval: bool = True
 
     def to_agent_tool(self, *, cwd: Path) -> AgentTool:

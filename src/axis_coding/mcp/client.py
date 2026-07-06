@@ -97,8 +97,7 @@ class McpClientSession:
         except TimeoutError:
             await instance._cleanup_partial()
             raise McpConnectionError(
-                f"MCP server {server_name!r} connection timed out "
-                f"after {CONNECT_TIMEOUT_SECONDS}s"
+                f"MCP server {server_name!r} connection timed out after {CONNECT_TIMEOUT_SECONDS}s"
             ) from None
         except Exception as exc:
             await instance._cleanup_partial()

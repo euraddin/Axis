@@ -95,14 +95,13 @@ async def _run_linter(
         )
     except FileNotFoundError:
         return (
-            f"Linter not found: {command}. "
-            "Install it or configure a different linter."
-        ), None, False
+            (f"Linter not found: {command}. Install it or configure a different linter."),
+            None,
+            False,
+        )
 
     try:
-        stdout_bytes, _ = await asyncio.wait_for(
-            process.communicate(), timeout=timeout
-        )
+        stdout_bytes, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
     except TimeoutError:
         with contextlib.suppress(ProcessLookupError):
             process.kill()
@@ -159,9 +158,7 @@ async def _execute_lint(
 ) -> AgentToolResult:
     del arguments  # No user arguments — auto-detects from project config.
     command, base_args = _detect_python_linter(cwd)
-    output, exit_code, timed_out = await _run_linter(
-        cwd=cwd, command=command, args=base_args
-    )
+    output, exit_code, timed_out = await _run_linter(cwd=cwd, command=command, args=base_args)
 
     ok = exit_code == 0 and not timed_out
     parsed = _parse_ruff_output(output) if "ruff" in command else {}
@@ -176,9 +173,7 @@ async def _execute_lint(
         lines.append(f"\n{parsed['fix_hint']}")
     if output:
         truncated = (
-            output[:MAX_LINT_OUTPUT_BYTES]
-            if len(output) > MAX_LINT_OUTPUT_BYTES
-            else output
+            output[:MAX_LINT_OUTPUT_BYTES] if len(output) > MAX_LINT_OUTPUT_BYTES else output
         )
         lines.append(f"\n```text\n{truncated}\n```")
         if len(output) > MAX_LINT_OUTPUT_BYTES:
@@ -212,14 +207,15 @@ class LintToolDefinition:
     prompt_guidelines: tuple[str, ...] = (
         "Run lint before committing changes to catch style and correctness issues.",
         "After lint reports issues, fix them and re-run lint to verify.",
-        "Prefer the lint tool over shelling out to ruff/pylint directly for "
-        "structured output.",
+        "Prefer the lint tool over shelling out to ruff/pylint directly for structured output.",
     )
-    input_schema: Mapping[str, JSONValue] = field(default_factory=lambda: {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    })
+    input_schema: Mapping[str, JSONValue] = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+    )
     requires_approval: bool = False
 
     def to_agent_tool(self, *, cwd: Path) -> AgentTool:

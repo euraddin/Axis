@@ -452,10 +452,17 @@ def test_create_coding_tools_returns_stable_default_order(tmp_path: Path) -> Non
         "web_search",
     ]
     assert [tool.requires_approval for tool in tools] == [
-        False, True, True, True,    # read, write, edit, bash
-        False, False, False, True,  # git_status, git_diff, git_log, git_commit
-        False,                      # lint
-        False, False,               # web_fetch, web_search
+        False,
+        True,
+        True,
+        True,  # read, write, edit, bash
+        False,
+        False,
+        False,
+        True,  # git_status, git_diff, git_log, git_commit
+        False,  # lint
+        False,
+        False,  # web_fetch, web_search
     ]
     assert tools[0].auto_approve_if is None  # read is unconditionally read-only
     assert tools[3].auto_approve_if is not None  # bash uses a classifier
