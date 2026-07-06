@@ -109,6 +109,10 @@ def test_new_coding_session_prepares_metadata_without_creating_file(
         "write",
         "edit",
         "bash",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_commit",
         "web_fetch",
         "web_search",
     ]

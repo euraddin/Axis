@@ -88,8 +88,13 @@ def create_coding_tools(
     *,
     cwd: str | Path | None = None,
     include_web_tools: bool = True,
+    include_git_tools: bool = True,
 ) -> list[AgentTool]:
-    """Create Axis's default read, write, edit, bash and web tools in stable order."""
+    """Create Axis's default tools in stable order.
+
+    Order: read, write, edit, bash, git_status, git_diff, git_log, git_commit,
+    web_fetch, web_search.
+    """
     root = Path.cwd() if cwd is None else Path(cwd)
     tools: list[AgentTool] = [
         create_read_tool(cwd=root),
@@ -97,6 +102,10 @@ def create_coding_tools(
         create_edit_tool(cwd=root),
         create_bash_tool(cwd=root),
     ]
+    if include_git_tools:
+        from axis_coding.git_tools import create_git_tools
+
+        tools.extend(create_git_tools(cwd=root))
     if include_web_tools:
         from axis_coding.web_tools import create_web_tools
 

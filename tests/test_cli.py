@@ -104,6 +104,10 @@ def test_run_print_mode_uses_harness_and_renders_final_text(tmp_path: Path) -> N
         "write",
         "edit",
         "bash",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_commit",
         "web_fetch",
         "web_search",
     ]
