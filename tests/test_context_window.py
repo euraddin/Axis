@@ -112,7 +112,7 @@ def test_context_usage_reports_system_message_and_tool_proportions(tmp_path: Pat
     assert usage.tool_tokens == sum(estimate_tool_tokens(tool) for tool in tools)
     assert usage.total_tokens == (usage.system_tokens + usage.message_tokens + usage.tool_tokens)
     assert usage.message_count == 1
-    assert usage.tool_count == 4
+    assert usage.tool_count == 6
     assert (
         estimate_context_tokens(
             system="You are Axis.",

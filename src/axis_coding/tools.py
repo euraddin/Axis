@@ -84,15 +84,24 @@ class ToolDefinition:
         )
 
 
-def create_coding_tools(*, cwd: str | Path | None = None) -> list[AgentTool]:
-    """Create Axis's default read, write, edit and bash tools in stable order."""
+def create_coding_tools(
+    *,
+    cwd: str | Path | None = None,
+    include_web_tools: bool = True,
+) -> list[AgentTool]:
+    """Create Axis's default read, write, edit, bash and web tools in stable order."""
     root = Path.cwd() if cwd is None else Path(cwd)
-    return [
+    tools: list[AgentTool] = [
         create_read_tool(cwd=root),
         create_write_tool(cwd=root),
         create_edit_tool(cwd=root),
         create_bash_tool(cwd=root),
     ]
+    if include_web_tools:
+        from axis_coding.web_tools import create_web_tools
+
+        tools.extend(create_web_tools())
+    return tools
 
 
 def create_read_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinition:

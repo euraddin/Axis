@@ -104,7 +104,14 @@ def test_new_coding_session_prepares_metadata_without_creating_file(
     assert session.cwd == tmp_path.resolve()
     assert session.model == "deepseek-v4-pro"
     assert session.messages == ()
-    assert [tool.name for tool in session.tools] == ["read", "write", "edit", "bash"]
+    assert [tool.name for tool in session.tools] == [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "web_fetch",
+        "web_search",
+    ]
     assert session.state.session_info is not None
     assert session.state.session_info.cwd == str(tmp_path.resolve())
 

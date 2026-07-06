@@ -99,7 +99,14 @@ def test_run_print_mode_uses_harness_and_renders_final_text(tmp_path: Path) -> N
     assert stderr.getvalue() == ""
     assert provider.calls[0][0] == "fake-model"
     assert provider.calls[0][2] == [UserMessage(content="Inspect this project")]
-    assert [tool.name for tool in provider.calls[0][3]] == ["read", "write", "edit", "bash"]
+    assert [tool.name for tool in provider.calls[0][3]] == [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "web_fetch",
+        "web_search",
+    ]
     assert str(tmp_path) in provider.calls[0][1]
 
 

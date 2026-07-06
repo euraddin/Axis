@@ -438,8 +438,22 @@ def test_edit_tool_rejects_missing_files_and_directories(
 def test_create_coding_tools_returns_stable_default_order(tmp_path: Path) -> None:
     tools = create_coding_tools(cwd=tmp_path)
 
-    assert [tool.name for tool in tools] == ["read", "write", "edit", "bash"]
-    assert [tool.requires_approval for tool in tools] == [False, True, True, True]
+    assert [tool.name for tool in tools] == [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "web_fetch",
+        "web_search",
+    ]
+    assert [tool.requires_approval for tool in tools] == [
+        False,
+        True,
+        True,
+        True,
+        False,
+        False,
+    ]
     assert tools[0].auto_approve_if is None  # read is unconditionally read-only
     assert tools[3].auto_approve_if is not None  # bash uses a classifier
 
